@@ -4,5 +4,7 @@
 //! `igui::repl_child` panes onto Core Graphics + Core Text + AppKit events.
 
 pub mod editor;
+pub mod repl;
 
 pub use editor::{Editor, Theme};
+pub use repl::Repl;

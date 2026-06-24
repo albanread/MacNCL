@@ -149,6 +149,22 @@ impl Editor {
     pub fn text(&self) -> String {
         self.buffer.to_utf8()
     }
+    /// Replace the whole buffer, putting the cursor at the end and
+    /// clearing history. Used by the REPL input line (recall / clear).
+    pub fn set_text(&mut self, s: &str) {
+        self.buffer = RopeBuffer::from_utf8(s.as_bytes());
+        self.cursor = self.buffer.len();
+        self.anchor = self.cursor;
+        self.pref_col = self.cursor_rc().1;
+        self.scroll_top = 0;
+        self.undo.clear();
+        self.redo.clear();
+        self.coalesce = None;
+        self.dirty = false;
+    }
+    pub fn clear(&mut self) {
+        self.set_text("");
+    }
     pub fn is_dirty(&self) -> bool {
         self.dirty
     }
