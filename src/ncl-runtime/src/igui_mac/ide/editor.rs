@@ -581,13 +581,80 @@ impl Editor {
     }
 
     pub fn insert_newline(&mut self) {
-        // Auto-indent: copy the leading whitespace of the current line.
+        self.do_insert("\n", None);
+        self.reindent_line();
+    }
+
+    /// Lisp-aware indentation for a line starting at `pos`: align the body
+    /// under the first argument of the enclosing form, or `open_col + 2`
+    /// for a special form, or `open_col + 1` otherwise. Top level → 0.
+    fn compute_indent(&self, pos: usize) -> usize {
+        let cs = self.chars();
+        let Some(open) = sexp::enclosing_open(&cs, pos) else {
+            return 0;
+        };
+        let (open_line, open_col) = self.buffer.offset_to_line_col(open);
+        let op_start = sexp::skip_ws_fwd(&cs, open + 1);
+        if op_start >= pos || op_start >= cs.len() {
+            return open_col + 1;
+        }
+        // Operator that is itself a list → align one past the open paren.
+        if matches!(cs[op_start], '(' | '[') {
+            return open_col + 1;
+        }
+        let mut op_end = op_start;
+        while op_end < cs.len() && !is_delim(cs[op_end]) {
+            op_end += 1;
+        }
+        let op: String = cs[op_start..op_end].iter().collect();
+        if is_special(&op) {
+            return open_col + 2;
+        }
+        // Align under the first argument if it's on the operator's line.
+        let arg_start = sexp::skip_ws_fwd(&cs, op_end);
+        if arg_start < pos && !matches!(cs.get(arg_start), Some(')') | Some(']') | None) {
+            let (arg_line, arg_col) = self.buffer.offset_to_line_col(arg_start);
+            if arg_line == open_line {
+                return arg_col;
+            }
+        }
+        op_start - self.buffer.line_col_to_offset(open_line, 0) // operator column
+    }
+
+    /// Re-indent the current line to its computed Lisp indentation.
+    pub fn reindent_line(&mut self) {
         let (row, _) = self.cursor_rc();
-        let line = self.line_text(row);
-        let indent: String = line.chars().take_while(|c| *c == ' ' || *c == '\t').collect();
-        let mut s = String::from("\n");
-        s.push_str(&indent);
-        self.do_insert(&s, None);
+        let line_start = self.buffer.line_col_to_offset(row, 0);
+        let cs = self.chars();
+        let mut ws = 0;
+        while line_start + ws < cs.len() && matches!(cs[line_start + ws], ' ' | '\t') {
+            ws += 1;
+        }
+        let want = self.compute_indent(line_start);
+        if want == ws {
+            return;
+        }
+        let cursor_in_line = self.cursor as isize - line_start as isize;
+        if ws > 0 {
+            self.edit_delete(line_start, line_start + ws);
+        }
+        if want > 0 {
+            let spaces: Vec<u32> = std::iter::repeat_n(' ' as u32, want).collect();
+            self.edit_insert(line_start, &spaces);
+        }
+        let delta = want as isize - ws as isize;
+        let new_in_line = if cursor_in_line <= ws as isize {
+            want as isize
+        } else {
+            cursor_in_line + delta
+        };
+        self.cursor = (line_start as isize + new_in_line).max(line_start as isize) as usize;
+        self.cursor = self.cursor.min(self.buffer.len());
+        self.anchor = self.cursor;
+        self.pref_col = self.cursor_rc().1;
+        self.dirty = true;
+        self.redo.clear();
+        self.coalesce = None;
     }
 
     pub fn backspace(&mut self) {
@@ -895,6 +962,58 @@ impl Editor {
         self.finish_structural_edit(open);
     }
 
+    /// Toggle `;; ` line comments over the current line or selection. If
+    /// every affected (non-blank) line is already commented, uncomment;
+    /// otherwise comment. Lines are edited bottom-up so offsets stay valid.
+    pub fn toggle_comment(&mut self) {
+        let (lo_row, hi_row) = match self.selection_range() {
+            Some((a, b)) => {
+                let ar = self.buffer.offset_to_line_col(a).0;
+                let br = self.buffer.offset_to_line_col(b.saturating_sub(1).max(a)).0;
+                (ar, br)
+            }
+            None => {
+                let r = self.cursor_rc().0;
+                (r, r)
+            }
+        };
+        let all_commented = (lo_row..=hi_row).all(|r| {
+            let t = self.line_text(r);
+            let tr = t.trim_start();
+            tr.is_empty() || tr.starts_with(';')
+        });
+        for r in (lo_row..=hi_row).rev() {
+            let t = self.line_text(r);
+            if t.trim().is_empty() {
+                continue;
+            }
+            let lead_ws = t.chars().take_while(|c| *c == ' ' || *c == '\t').count();
+            let line_start = self.buffer.line_col_to_offset(r, 0);
+            let at = line_start + lead_ws;
+            if all_commented {
+                let cs = self.chars();
+                let mut p = at;
+                while p < cs.len() && cs[p] == ';' {
+                    p += 1;
+                }
+                if p > at {
+                    if p < cs.len() && cs[p] == ' ' {
+                        p += 1;
+                    }
+                    self.edit_delete(at, p);
+                }
+            } else {
+                self.edit_insert(at, &[';' as u32, ';' as u32, ' ' as u32]);
+            }
+        }
+        self.cursor = self.cursor.min(self.buffer.len());
+        self.anchor = self.cursor;
+        self.pref_col = self.cursor_rc().1;
+        self.dirty = true;
+        self.redo.clear();
+        self.coalesce = None;
+    }
+
     /// The matching-bracket offset for a bracket adjacent to the cursor,
     /// for paren-match highlighting. Returns `(here, there)` bracket
     /// offsets, or `None`.
@@ -941,6 +1060,7 @@ impl Editor {
                 0x56 => self.paste(),              // Cmd-V
                 0x5A if shift => self.redo(),      // Cmd-Shift-Z
                 0x5A => self.undo(),               // Cmd-Z
+                vk::OEM_2 => self.toggle_comment(), // Cmd-/
                 _ => return false,
             }
             return true;
@@ -972,7 +1092,7 @@ impl Editor {
             vk::BACK => self.backspace(),
             vk::DELETE => self.delete_forward(),
             vk::RETURN => self.insert_newline(),
-            vk::TAB => self.insert_str("  "),
+            vk::TAB => self.reindent_line(),
             _ => return false,
         }
         true
@@ -1196,12 +1316,32 @@ mod tests {
     }
 
     #[test]
-    fn newline_auto_indents() {
-        let mut e = Editor::with_text("  foo");
-        e.set_cursor_offset(5, false); // end of "  foo"
+    fn newline_indents_inside_special_form() {
+        // Inside an (unclosed) special form, the body indents to col 2.
+        let mut e = Editor::with_text("(defun foo ()");
+        e.set_cursor(e.text().chars().count());
         e.insert_newline();
-        assert_eq!(e.text(), "  foo\n  ");
+        assert_eq!(e.text(), "(defun foo ()\n  ");
         assert_eq!(e.cursor_rc(), (1, 2));
+    }
+
+    #[test]
+    fn newline_aligns_under_first_arg() {
+        // A function call aligns the body under the first argument.
+        let mut e = Editor::with_text("(+ 1 2");
+        e.set_cursor(e.text().chars().count());
+        e.insert_newline();
+        // open at col 0, operator "+" at col 1, first arg "1" at col 3.
+        assert_eq!(e.text(), "(+ 1 2\n   ");
+        assert_eq!(e.cursor_rc(), (1, 3));
+    }
+
+    #[test]
+    fn top_level_newline_no_indent() {
+        let mut e = Editor::with_text("foo");
+        e.set_cursor(3);
+        e.insert_newline();
+        assert_eq!(e.text(), "foo\n");
     }
 
     #[test]
@@ -1316,6 +1456,16 @@ mod tests {
         e.set_cursor(3); // on the '(' of (b c)
         e.raise();
         assert_eq!(e.text(), "(b c)");
+    }
+
+    #[test]
+    fn comment_toggle_round_trip() {
+        let mut e = Editor::with_text("(foo)");
+        e.set_cursor(0);
+        e.toggle_comment();
+        assert_eq!(e.text(), ";; (foo)");
+        e.toggle_comment();
+        assert_eq!(e.text(), "(foo)");
     }
 
     #[test]

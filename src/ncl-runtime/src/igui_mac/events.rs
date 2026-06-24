@@ -55,6 +55,7 @@ pub mod kvk {
     pub const F10: u16 = 0x6D;
     pub const F11: u16 = 0x67;
     pub const F12: u16 = 0x6F;
+    pub const SLASH: u16 = 0x2C; // kVK_ANSI_Slash
 }
 
 /// Win32 virtual-key codes we map onto (the values the Lisp side expects).
@@ -74,6 +75,7 @@ pub mod vk {
     pub const DOWN: i64 = 0x28;
     pub const DELETE: i64 = 0x2E;
     pub const F1: i64 = 0x70;
+    pub const OEM_2: i64 = 0xBF; // '/' '?'
 }
 
 /// Translate `NSEventModifierFlags` into the `igui_events::modifier::*`
@@ -131,6 +133,7 @@ pub fn vkey_from_keycode(keycode: u16) -> i64 {
         kvk::F10 => vk::F1 + 9,
         kvk::F11 => vk::F1 + 10,
         kvk::F12 => vk::F1 + 11,
+        kvk::SLASH => vk::OEM_2,
         _ => 0,
     }
 }

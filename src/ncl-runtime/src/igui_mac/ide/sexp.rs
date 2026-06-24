@@ -168,6 +168,39 @@ pub fn enclosing(cps: &[char], pos: usize) -> Option<(usize, usize)> {
     best
 }
 
+/// The innermost *open* bracket whose scope contains `pos`, even if it
+/// is not yet closed (the common case while typing). Used for auto-indent.
+pub fn enclosing_open(cps: &[char], pos: usize) -> Option<usize> {
+    let mut stack: Vec<usize> = Vec::new();
+    let mut i = 0;
+    let end = pos.min(cps.len());
+    while i < end {
+        match cps[i] {
+            '"' => {
+                i = end_of_string(cps, i);
+                continue;
+            }
+            ';' => {
+                while i < cps.len() && cps[i] != '\n' {
+                    i += 1;
+                }
+                continue;
+            }
+            '#' if i + 1 < cps.len() && cps[i + 1] == '\\' => {
+                i += 3;
+                continue;
+            }
+            c if is_open(c) => stack.push(i),
+            c if is_close(c) => {
+                stack.pop();
+            }
+            _ => {}
+        }
+        i += 1;
+    }
+    stack.last().copied()
+}
+
 /// Skip leading reader prefixes (`'` `` ` `` `,` `,@` `#'`) at `i`,
 /// returning the index of the prefixed datum.
 fn skip_prefix(cps: &[char], mut i: usize) -> usize {
