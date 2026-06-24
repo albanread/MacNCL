@@ -672,6 +672,88 @@ impl Editor {
         self.coalesce = None;
     }
 
+    /// Re-indent every line touched by the selection (or the current line).
+    /// Processes top-down so each line sees the corrected indentation above.
+    pub fn reindent_selection(&mut self) {
+        let (lo, hi) = match self.selection_range() {
+            Some((a, b)) => (
+                self.buffer.offset_to_line_col(a).0,
+                self.buffer.offset_to_line_col(b.saturating_sub(1).max(a)).0,
+            ),
+            None => {
+                let r = self.cursor_rc().0;
+                (r, r)
+            }
+        };
+        for row in lo..=hi {
+            let off = self.buffer.line_col_to_offset(row, 0);
+            self.cursor = off;
+            self.anchor = off;
+            self.reindent_line();
+        }
+    }
+
+    /// Duplicate the current line below the cursor.
+    pub fn duplicate_line(&mut self) {
+        let (row, col) = self.cursor_rc();
+        let line = self.line_text(row);
+        let line_end = self.buffer.line_col_to_offset(row, 0) + self.line_len_cps(row);
+        let text = format!("\n{line}");
+        self.edit_insert(line_end, &utf8_to_codepoints(text.as_bytes()));
+        let nc = self.buffer.line_col_to_offset(row + 1, col);
+        self.finish_structural_edit(nc);
+    }
+
+    /// Delete the current line.
+    pub fn delete_line(&mut self) {
+        let (row, _) = self.cursor_rc();
+        let n = self.buffer.line_count();
+        let line_start = self.buffer.line_col_to_offset(row, 0);
+        let (lo, hi) = if row + 1 < n {
+            (line_start, self.buffer.line_col_to_offset(row + 1, 0))
+        } else if row > 0 {
+            (line_start.saturating_sub(1), self.buffer.len())
+        } else {
+            (line_start, self.buffer.len())
+        };
+        self.edit_delete(lo, hi);
+        self.finish_structural_edit(lo.min(self.buffer.len()));
+    }
+
+    /// Swap the current line with the one below.
+    pub fn move_line_down(&mut self) {
+        let (row, col) = self.cursor_rc();
+        if row + 1 >= self.buffer.line_count() {
+            return;
+        }
+        let cur = self.line_text(row);
+        let next = self.line_text(row + 1);
+        let start = self.buffer.line_col_to_offset(row, 0);
+        let end = self.buffer.line_col_to_offset(row + 1, 0) + self.line_len_cps(row + 1);
+        let replacement = format!("{next}\n{cur}");
+        self.edit_delete(start, end);
+        self.edit_insert(start, &utf8_to_codepoints(replacement.as_bytes()));
+        let nc = self.buffer.line_col_to_offset(row + 1, col.min(self.line_len_cps(row + 1)));
+        self.finish_structural_edit(nc);
+    }
+
+    /// Swap the current line with the one above.
+    pub fn move_line_up(&mut self) {
+        let (row, col) = self.cursor_rc();
+        if row == 0 {
+            return;
+        }
+        let prev = self.line_text(row - 1);
+        let cur = self.line_text(row);
+        let start = self.buffer.line_col_to_offset(row - 1, 0);
+        let end = self.buffer.line_col_to_offset(row, 0) + self.line_len_cps(row);
+        let replacement = format!("{cur}\n{prev}");
+        self.edit_delete(start, end);
+        self.edit_insert(start, &utf8_to_codepoints(replacement.as_bytes()));
+        let nc = self.buffer.line_col_to_offset(row - 1, col.min(self.line_len_cps(row)));
+        self.finish_structural_edit(nc);
+    }
+
     pub fn backspace(&mut self) {
         if self.delete_selection_to_undo() {
             return;
@@ -1164,6 +1246,7 @@ impl Editor {
         // undo); Control (CONTROL bit) drives paredit, as in Emacs/SLIME.
         let cmd = mods & modifier::WIN != 0;
         let ctrl = mods & modifier::CONTROL != 0;
+        let alt = mods & modifier::ALT != 0;
 
         // Incremental-search mode swallows most keys.
         if self.search.is_some() && !cmd {
@@ -1188,7 +1271,18 @@ impl Editor {
                 0x56 => self.paste(),              // Cmd-V
                 0x5A if shift => self.redo(),      // Cmd-Shift-Z
                 0x5A => self.undo(),               // Cmd-Z
+                0x44 => self.duplicate_line(),       // Cmd-D
+                0x4B if shift => self.delete_line(), // Cmd-Shift-K
                 vk::OEM_2 => self.toggle_comment(), // Cmd-/
+                _ => return false,
+            }
+            return true;
+        }
+
+        if alt {
+            match vkey {
+                vk::UP => self.move_line_up(),     // Alt-Up
+                vk::DOWN => self.move_line_down(), // Alt-Down
                 _ => return false,
             }
             return true;
@@ -1220,7 +1314,13 @@ impl Editor {
             vk::BACK => self.backspace(),
             vk::DELETE => self.delete_forward(),
             vk::RETURN => self.insert_newline(),
-            vk::TAB => self.reindent_line(),
+            vk::TAB => {
+                if self.selection_range().is_some() {
+                    self.reindent_selection();
+                } else {
+                    self.reindent_line();
+                }
+            }
             _ => return false,
         }
         true
@@ -1654,6 +1754,23 @@ mod tests {
             e.on_char(c as u32);
         }
         assert_eq!(e.search.as_ref().unwrap().matches, vec![0, 4, 8]);
+    }
+
+    #[test]
+    fn line_ops_duplicate_delete_move() {
+        let mut e = Editor::with_text("aaa\nbbb\nccc");
+        e.set_cursor_rc(1, 0, false); // on "bbb"
+        e.duplicate_line();
+        assert_eq!(e.text(), "aaa\nbbb\nbbb\nccc");
+        e.set_cursor_rc(1, 0, false);
+        e.delete_line();
+        assert_eq!(e.text(), "aaa\nbbb\nccc");
+        e.set_cursor_rc(1, 0, false);
+        e.move_line_down();
+        assert_eq!(e.text(), "aaa\nccc\nbbb");
+        e.set_cursor_rc(2, 0, false);
+        e.move_line_up();
+        assert_eq!(e.text(), "aaa\nbbb\nccc");
     }
 
     #[test]

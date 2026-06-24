@@ -257,6 +257,10 @@ impl Ide {
                     }
                     return IdeAction::None;
                 } // Cmd-R run buffer
+                0x4B if mods & modifier::SHIFT == 0 => {
+                    self.repl.clear();
+                    return IdeAction::None;
+                } // Cmd-K clear REPL (Cmd-Shift-K falls through to editor delete-line)
                 0x53 => {
                     match self.ed_mut().save() {
                         Ok(Some(p)) => self.repl.info(&format!("; saved {p}")),

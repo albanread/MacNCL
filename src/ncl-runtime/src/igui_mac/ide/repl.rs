@@ -139,6 +139,11 @@ impl Repl {
     pub fn info(&mut self, text: &str) {
         self.print(LineKind::Info, text);
     }
+    /// Clear the transcript (Cmd-K).
+    pub fn clear(&mut self) {
+        self.transcript.clear();
+        self.scroll_from_bottom = 0;
+    }
 
     fn history_prev(&mut self) {
         if self.history.is_empty() {

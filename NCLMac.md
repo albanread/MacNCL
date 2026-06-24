@@ -89,9 +89,12 @@ Definitions you write in the editor become live in the REPL:
 | **Cmd-S** | save file | | **Ctrl-W** | wrap in `( )` |
 | **Cmd-F / Cmd-G** | find / find next | | **Ctrl-S** | splice (remove brackets) |
 | **Cmd-/** | toggle comment | | **Ctrl-R** | raise sexp |
-| **Cmd-E / Cmd-L** | focus editor / REPL | | **Return** (REPL) | eval (balanced) |
-| **Cmd-Z / Shift-Cmd-Z** | undo / redo | | **↑ / ↓** (REPL) | history |
-| **Cmd-X/C/V/A** | cut/copy/paste/all | | **Esc** | cancel search |
+| **Cmd-E / Cmd-L** | focus editor / REPL | | **Tab** | reindent line / selection |
+| **Cmd-T / Cmd-W** | new / close tab | | **Cmd-D** | duplicate line |
+| **Cmd-1…9** | switch to tab N | | **Cmd-Shift-K** | delete line |
+| **Cmd-Z / Shift-Cmd-Z** | undo / redo | | **Alt-↑ / ↓** | move line up / down |
+| **Cmd-X/C/V/A** | cut/copy/paste/all | | **Cmd-K** | clear REPL |
+| **Return** (REPL) | eval (balanced) | | **↑ / ↓** (REPL) | history · **Esc** cancel search |
 
 Convention: **Command** drives editing and IDE accelerators; **Control** drives
 paredit. They never collide.
