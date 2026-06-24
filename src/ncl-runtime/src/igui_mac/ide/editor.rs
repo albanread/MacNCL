@@ -797,6 +797,29 @@ impl Editor {
             },
         };
 
+        let tok_color = |tok: Tok| match tok {
+            Tok::Special => t.c_special,
+            Tok::Keyword => t.c_keyword,
+            Tok::Number => t.c_number,
+            Tok::StringLit => t.c_string,
+            Tok::Char => t.c_char,
+            Tok::Comment => t.c_comment,
+            Tok::Paren => t.c_paren,
+            Tok::Quote => t.c_quote,
+            Tok::Symbol => t.fg,
+        };
+        let line_chars = |buf: &RopeBuffer, row: usize| -> Vec<char> {
+            buf.get_line(row).iter().filter_map(|&c| char::from_u32(c)).collect()
+        };
+
+        // Recover the multi-line-string state at the first visible row by
+        // tokenising everything above it (cheap for the files this targets).
+        let mut in_string = false;
+        for row in 0..self.scroll_top.min(line_count) {
+            let (_, ns) = tokenize_line(&line_chars(&self.buffer, row), in_string);
+            in_string = ns;
+        }
+
         for vis in 0..self.visible_rows {
             let row = self.scroll_top + vis;
             if row >= line_count {
@@ -838,10 +861,16 @@ impl Editor {
                 ));
             }
 
-            // Line text.
-            let line = self.line_text(row);
-            if !line.is_empty() {
-                cmds.push(mk_run(line, text_x0, y, t.fg));
+            // Line text, syntax-highlighted (one run per token span).
+            let chars = line_chars(&self.buffer, row);
+            let (spans, ns) = tokenize_line(&chars, in_string);
+            in_string = ns;
+            for (s, e, tok) in spans {
+                if s >= e {
+                    continue;
+                }
+                let text: String = chars[s..e].iter().collect();
+                cmds.push(mk_run(text, text_x0 + s as f32 * cell_w, y, tok_color(tok)));
             }
         }
 
@@ -935,6 +964,42 @@ mod tests {
         e.on_key(vk::DOWN, 0); // to short line "x" → col clamps to 1
         e.on_key(vk::DOWN, 0); // to "another" → pref_col 6 restored
         assert_eq!(e.cursor_rc(), (2, 6));
+    }
+
+    #[test]
+    fn tokenizer_classifies_lisp() {
+        let chars: Vec<char> = "(defun foo (:x) ; note".chars().collect();
+        let (spans, _) = tokenize_line(&chars, false);
+        let kinds: Vec<Tok> = spans.iter().map(|(_, _, t)| *t).collect();
+        assert!(kinds.contains(&Tok::Paren), "{kinds:?}");
+        assert!(kinds.contains(&Tok::Special), "defun should be Special: {kinds:?}");
+        assert!(kinds.contains(&Tok::Symbol), "foo should be Symbol");
+        assert!(kinds.contains(&Tok::Keyword), ":x should be Keyword");
+        assert!(kinds.contains(&Tok::Comment), "; note should be Comment");
+    }
+
+    #[test]
+    fn tokenizer_numbers_strings_chars() {
+        let chars: Vec<char> = "(+ 42 -1.5 \"hi\" #\\a)".chars().collect();
+        let (spans, in_str) = tokenize_line(&chars, false);
+        let kinds: Vec<Tok> = spans.iter().map(|(_, _, t)| *t).collect();
+        assert!(kinds.contains(&Tok::Number), "42/-1.5 numbers: {kinds:?}");
+        assert!(kinds.contains(&Tok::StringLit), "string");
+        assert!(kinds.contains(&Tok::Char), "#\\a char literal");
+        assert!(!in_str, "string closed on same line");
+    }
+
+    #[test]
+    fn render_highlights_special_form() {
+        let mut e = Editor::with_text("(defun hi () 42)");
+        let cmds = e.render(area());
+        // The "defun" run should carry the special-form color, not fg.
+        let special = e.theme().c_special;
+        let found = cmds.iter().any(|c| matches!(c,
+            SurfaceCmd::DrawTextRun { run }
+                if run.text == "defun"
+                && run.color.r == special.r && run.color.g == special.g));
+        assert!(found, "defun should render in the special-form colour");
     }
 
     #[test]
