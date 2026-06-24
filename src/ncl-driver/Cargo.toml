@@ -16,6 +16,9 @@ default = ["gc-page-heap"]
 #   * makes --windows the default (no explicit flag needed)
 #   * embeds a Win32 application manifest (DPI-aware, Vista+ compat)
 gui-app = []
+# mac-gui: the macOS Cocoa IDE window (REPL/editor). `ncl --windows` opens
+# it. Pulls ncl-runtime's mac-gui (objc2 AppKit). See docs/PORTING_DESIGN.md.
+mac-gui = ["ncl-runtime/mac-gui"]
 gc-page-heap = [
     "ncl-runtime/gc-page-heap",
     "ncl-cl/gc-page-heap",

@@ -105,9 +105,109 @@ fn main() -> ExitCode {
     let want_windows = raw_args.iter().any(|a| a == "--windows" || a == "-W");
 
     if want_windows {
-        run_with_windows_surface(raw_args)
+        // macOS: open the Cocoa IDE window (REPL) on the main thread, with
+        // the Lisp session on a worker. See `run_mac_gui`.
+        #[cfg(all(target_os = "macos", feature = "mac-gui"))]
+        {
+            return run_mac_gui(raw_args);
+        }
+        #[cfg(not(all(target_os = "macos", feature = "mac-gui")))]
+        {
+            run_with_windows_surface(raw_args)
+        }
     } else {
         run_without_windows_surface(raw_args)
+    }
+}
+
+/// macOS Cocoa IDE entry. The main thread runs the AppKit window; the Lisp
+/// session is built and driven on a worker thread that owns a `Repl` pane,
+/// evaluating submitted forms through the compiler and presenting the
+/// rendered transcript back to the window.
+#[cfg(all(target_os = "macos", feature = "mac-gui"))]
+fn run_mac_gui(_raw_args: Vec<String>) -> ExitCode {
+    use ncl_runtime::igui_events::{self, IGuiEvent};
+    use ncl_runtime::igui_mac::ide::{Repl, Theme};
+    use ncl_runtime::igui_mac::render::CgCanvas;
+    use ncl_runtime::igui_mac::window;
+    use ncl_runtime::igui_paint::{
+        FontStretch, FontStyle, Point, Rect, Rgba, TextAlign, TextRun, TextTrimming,
+    };
+
+    const W: f64 = 900.0;
+    const H: f64 = 620.0;
+
+    // Measure the monospace cell for a family/size via Core Text.
+    fn metrics(family: &str, size: f32) -> (f32, f32, f32) {
+        let run = TextRun {
+            text: "M".into(),
+            origin: Point { x: 0.0, y: 0.0 },
+            family: family.into(),
+            size,
+            weight: 400,
+            style: FontStyle::Normal,
+            stretch: FontStretch::Normal,
+            locale: "en-us".into(),
+            color: Rgba { r: 1.0, g: 1.0, b: 1.0, a: 1.0 },
+            max_width: None,
+            alignment: TextAlign::Leading,
+            trimming: TextTrimming::None,
+        };
+        match CgCanvas::measure_text_run(&run) {
+            Some(m) => (m.width.max(1.0), m.height.max(size * 1.2), m.ascent),
+            None => (size * 0.6, size * 1.3, size),
+        }
+    }
+
+    let worker = move || {
+        let area = Rect { x0: 0.0, y0: 0.0, x1: W as f32, y1: H as f32 };
+        let theme = Theme::default();
+        let (cw, ch, asc) = metrics(&theme.family, theme.size);
+        let mut repl = Repl::new(theme);
+        repl.set_metrics(cw, ch, asc);
+        repl.info("Booting NCL standard library…");
+        window::present(repl.render(area));
+
+        let mut session = match ncl_compiler::Session::with_stdlib() {
+            Ok(s) => s,
+            Err(e) => {
+                repl.error(&format!("stdlib bootstrap failed: {e:?}"));
+                window::present(repl.render(area));
+                return;
+            }
+        };
+        repl.info(&format!("NCL {VERSION} on Apple Silicon — ready."));
+        window::present(repl.render(area));
+
+        loop {
+            match igui_events::next_event(-1) {
+                None | Some(IGuiEvent::FrameClose) | Some(IGuiEvent::Close { .. }) => break,
+                Some(ev) => {
+                    // Skip the present churn for bare pointer motion.
+                    let is_move = matches!(
+                        &ev,
+                        IGuiEvent::Mouse { op, .. } if *op == igui_events::mouse_op::MOVE
+                    );
+                    if let Some(src) = repl.handle_event(&ev) {
+                        match session.eval(&src) {
+                            Ok(s) => repl.output(&s),
+                            Err(e) => repl.error(&format!("{e:?}")),
+                        }
+                    }
+                    if !is_move {
+                        window::present(repl.render(area));
+                    }
+                }
+            }
+        }
+    };
+
+    match window::run("MacNCL — REPL", W, H, worker) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("ncl: {e}");
+            ExitCode::from(1)
+        }
     }
 }
 

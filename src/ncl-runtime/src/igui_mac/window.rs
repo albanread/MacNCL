@@ -70,13 +70,11 @@ fn repaint(image_view: &NSImageView, w: f64, h: f64, mtm: MainThreadMarker) {
     };
     let mut canvas = CgCanvas::new(w as usize, h as usize);
     canvas.execute(&cmds);
-    // Debug: dump the exact frame being presented to a PPM once, so the
-    // composed window content is inspectable without a screen grab.
+    // Debug: dump the latest presented frame to a PPM (overwritten each
+    // repaint, which only fires when dirty) so window content is
+    // inspectable without a screen grab.
     if let Some(path) = std::env::var_os("NCL_IGUI_DUMP") {
-        static DUMPED: AtomicBool = AtomicBool::new(false);
-        if !DUMPED.swap(true, Ordering::AcqRel) {
-            let _ = std::fs::write(path, canvas.to_ppm());
-        }
+        let _ = std::fs::write(path, canvas.to_ppm());
     }
     let Some(img) = canvas.cg_image() else { return };
     // Bridge the servo `core_graphics` CGImage to objc2's `&CGImage`:
@@ -168,9 +166,11 @@ where
     app.activate();
 
     // Spawn the Lisp worker on a background thread (mirrors the Windows
-    // model: UI on thread 0, Lisp on a worker).
+    // model: UI on thread 0, Lisp on a worker). 8 MiB stack — the Lisp
+    // stdlib bootstrap recurses deeply through macroexpansion + codegen.
     std::thread::Builder::new()
         .name("ncl-lisp-worker".into())
+        .stack_size(8 * 1024 * 1024)
         .spawn(worker)
         .map_err(|e| format!("failed to spawn Lisp worker: {e}"))?;
 
