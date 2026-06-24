@@ -1,0 +1,166 @@
+// Architecture diagram grammar for mermaid diagrams
+// Based on mermaid.js langium grammar
+
+// ==================
+// Top-level structure
+// ==================
+
+diagram = { SOI ~ leading_content* ~ keyword_architecture ~ document ~ EOI }
+
+// Allow comments and newlines before the keyword
+leading_content = _{ comment_stmt | NEWLINE }
+
+keyword_architecture = _{ "architecture-beta" }
+
+document = { (NEWLINE | statement)* }
+
+// ==================
+// Statements
+// ==================
+
+statement = {
+    comment_stmt
+    | title_stmt
+    | acc_title_stmt
+    | acc_descr_stmt
+    | acc_descr_multiline_stmt
+    | group_stmt
+    | service_stmt
+    | junction_stmt
+    | edge_stmt
+}
+
+// ==================
+// Comments
+// ==================
+
+comment_stmt = { "%%" ~ (!NEWLINE ~ ANY)* ~ EOL }
+
+// ==================
+// Title and Accessibility
+// ==================
+
+title_stmt = {
+    "title" ~ title_text ~ comment_tail? ~ EOL
+}
+
+title_text = @{ (!NEWLINE ~ !comment_start ~ ANY)* }
+
+acc_title_stmt = {
+    "accTitle" ~ ":" ~ acc_title_text ~ comment_tail? ~ EOL
+}
+
+acc_title_text = @{ (!NEWLINE ~ !comment_start ~ ANY)* }
+
+acc_descr_stmt = {
+    "accDescr" ~ ":" ~ acc_descr_text ~ comment_tail? ~ EOL
+}
+
+acc_descr_text = @{ (!NEWLINE ~ !comment_start ~ ANY)* }
+
+acc_descr_multiline_stmt = {
+    "accDescr" ~ "{" ~ acc_descr_multiline_text ~ "}" ~ comment_tail? ~ EOL
+}
+
+acc_descr_multiline_text = @{ (!"}" ~ ANY)* }
+
+// ==================
+// Groups
+// ==================
+
+group_stmt = {
+    "group" ~ arch_id ~ arch_icon? ~ arch_title? ~ in_clause? ~ comment_tail? ~ EOL
+}
+
+// ==================
+// Services
+// ==================
+
+service_stmt = {
+    "service" ~ arch_id ~ (icon_text | arch_icon)? ~ arch_title? ~ in_clause? ~ comment_tail? ~ EOL
+}
+
+icon_text = @{ arch_string }
+
+// ==================
+// Junctions
+// ==================
+
+junction_stmt = {
+    "junction" ~ arch_id ~ in_clause? ~ comment_tail? ~ EOL
+}
+
+// ==================
+// In clause (for nesting)
+// ==================
+
+in_clause = {
+    "in" ~ arch_id
+}
+
+// ==================
+// Edges
+// ==================
+
+edge_stmt = {
+    arch_id ~ arrow_group? ~ arrow ~ arch_id ~ arrow_group? ~ comment_tail? ~ EOL
+}
+
+arrow = {
+    left_port ~ arrow_into? ~ arrow_line ~ arrow_into? ~ right_port
+}
+
+left_port = { ":" ~ arrow_direction }
+
+right_port = { arrow_direction ~ ":" }
+
+arrow_direction = { "L" | "R" | "T" | "B" }
+
+arrow_into = { "<" | ">" }
+
+arrow_line = {
+    arrow_line_with_label | arrow_line_simple
+}
+
+arrow_line_simple = @{ "--" }
+
+arrow_line_with_label = {
+    "-" ~ arrow_label ~ "-"
+}
+
+arrow_label = { arch_title }
+
+arrow_group = { "{" ~ "group" ~ "}" }
+
+// ==================
+// Common elements
+// ==================
+
+arch_id = @{
+    (ASCII_ALPHANUMERIC | "_") ~ (ASCII_ALPHANUMERIC | "_" | "-")*
+}
+
+arch_icon = @{
+    "(" ~ (ASCII_ALPHANUMERIC | "_" | "-" | ":")+ ~ ")"
+}
+
+arch_title = @{
+    "[" ~ (ASCII_ALPHANUMERIC | " " | "_")+ ~ "]"
+}
+
+// ==================
+// Whitespace
+// ==================
+
+comment_start = { "%%" }
+comment_tail = { "%%" ~ (!NEWLINE ~ ANY)* }
+arch_string = { double_quoted | single_quoted }
+double_quoted = { "\"" ~ double_inner* ~ "\"" }
+single_quoted = { "'" ~ single_inner* ~ "'" }
+double_inner = { escaped_char | (!"\"" ~ !"\\" ~ ANY) }
+single_inner = { escaped_char | (!"'" ~ !"\\" ~ ANY) }
+escaped_char = { "\\" ~ ANY }
+
+WHITESPACE = _{ " " | "\t" }
+NEWLINE = _{ "\r\n" | "\n" }
+EOL = _{ NEWLINE+ | EOI }

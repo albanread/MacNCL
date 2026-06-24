@@ -1,0 +1,31 @@
+[workspace]
+members = [
+    "crates/doc-crate",
+    "crates/docpane",
+    "crates/new-asm",
+    "crates/selkie",
+    "src/ncl-cl",
+    "src/ncl-compiler",
+    "src/ncl-driver",
+    "src/ncl-ir",
+    "src/ncl-llvm",
+    "src/ncl-loader",
+    "src/ncl-reader",
+    "src/ncl-runtime",
+    "tests/ncl-corman-demos",
+    "tests/ncl-tests",
+]
+resolver = "3"
+
+[workspace.package]
+edition = "2024"
+license = "MIT OR Apache-2.0"
+version = "0.0.0"
+
+[workspace.lints.rust]
+unsafe_op_in_unsafe_fn = "deny"
+
+[profile.release]
+opt-level = 3
+strip = "symbols"
+lto = "thin"

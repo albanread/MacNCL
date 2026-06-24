@@ -1,0 +1,89 @@
+[package]
+name = "ncl-runtime"
+version = "0.0.0"
+edition = "2024"
+
+[features]
+default = ["gc-page-heap"]
+gc-page-heap = []
+
+[dependencies]
+# Page-heap GC engine, extracted from this runtime and since hardened
+# (multi-mutator, correctness fixes). Pinned to a specific commit for
+# reproducibility — bump the rev deliberately, not implicitly. NCL
+# consumes it as PageHeap<LispLayout>; LispLayout is the crate's
+# built-in binding for our 3-bit-tag Word + HeapHeader model.
+newgc-core = { git = "https://github.com/albanread/GC-.git", rev = "caa3367511daf04a16e7f96ceace98d405040081" }
+
+# Bignum kernel. We use it as the arithmetic engine but store
+# limb data in our GC heap (see bignum.rs) — no Box<BigInt>
+# leaks, no GC finalizer machinery needed. See docs/BIGNUMS.md
+# for the rationale.
+num-bigint = "0.4"
+num-traits = "0.2"
+num-integer = "0.1"
+# Exact rationals (BigRational = Ratio<BigInt>). Storage layout
+# is ours; arithmetic kernels are num-rational's.
+num-rational = "0.4"
+# Complex<f64> for sqrt / sin / log etc. of negative-or-complex
+# args. Component arithmetic for #C(a b) we do ourselves so each
+# part keeps its exact-rational or bignum type.
+num-complex = "0.4"
+# Shortest-round-trip float printing. Replaces Dragon4 / Grisu /
+# Steele-White with the simpler Ryū algorithm (Adams 2018).
+ryu = "1.0"
+# Filesystem watcher for hot reload. notify spawns its own thread
+# and posts events into a channel we drain on the Lisp side at
+# safe points (between REPL prompts). Default recommended-watcher
+# uses ReadDirectoryChangesW on Windows, inotify on Linux, FSEvents
+# on macOS.
+notify = "8"
+
+# Windows-only iGui dependency surface — Direct2D / Direct3D 11 /
+# DirectWrite plus the Win32 windowing layer. Versions tracked
+# against the sister NewCP repo to keep the iGui port up to date.
+
+[target.'cfg(windows)'.dependencies]
+windows-numerics = "0.3"
+# NewAudio — sibling project (out-of-repo). Windows-only; the
+# cfg(not(windows)) stub backend in src/audio.rs makes the dep
+# unnecessary off-Windows. Removed in MacNCL (hard fork) because the
+# path points outside the repo and Cargo must resolve it even on macOS.
+# Reinstate behind a real path/vendor if a Windows MacNCL build is wanted.
+# newaudio = { path = "../../../../NewAudio/NewAudio/crates/newaudio" }
+# docpane — Direct2D markdown + Mermaid render core, vendored from
+# NewFactor's `crates/docpane`. Powers `igui::doc_pane` (in-window
+# pane type) and the headless `doc-crate` snapshot tool. Windows-only
+# because the renderer targets Direct2D / DirectWrite.
+docpane = { path = "../../crates/docpane" }
+
+[target.'cfg(windows)'.dependencies.windows]
+version = "0.62"
+features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct2D",
+    "Win32_Graphics_Direct2D_Common",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_System_Com",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Performance",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_Controls",
+    "Win32_UI_Controls_Dialogs",
+    "Win32_System_DataExchange",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Kernel",
+    "Win32_System_Memory",
+    "Win32_System_Ole",
+]
+
+[lints]
+workspace = true

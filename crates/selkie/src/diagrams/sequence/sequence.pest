@@ -1,0 +1,388 @@
+// Sequence Diagram grammar for mermaid diagrams
+// Based on mermaid.js sequenceDiagram.jison
+
+// ==================
+// Top-level structure
+// ==================
+
+diagram = { SOI ~ leading_content* ~ keyword_sequence_diagram ~ document ~ EOI }
+
+// Allow comments and newlines before the keyword
+leading_content = _{ leading_comment | NEWLINE }
+leading_comment = _{ "%%" ~ (!NEWLINE ~ ANY)* ~ NEWLINE? }
+
+keyword_sequence_diagram = _{ "sequenceDiagram" }
+
+document = { (NEWLINE | statement)* }
+
+// ==================
+// Statements
+// ==================
+
+statement = {
+    comment_stmt
+    | title_stmt
+    | acc_title_stmt
+    | acc_descr_stmt
+    | participant_stmt
+    | box_start
+    | autonumber_stmt
+    | activate_stmt
+    | deactivate_stmt
+    | loop_start
+    | alt_start
+    | alt_else
+    | critical_option   // Must come BEFORE opt_start (since "option" contains "opt")
+    | opt_start
+    | par_start
+    | par_and
+    | critical_start
+    | break_start
+    | rect_start
+    | end_stmt
+    | links_stmt
+    | link_stmt
+    | properties_stmt
+    | create_stmt
+    | destroy_stmt
+    | note_stmt
+    | message_stmt
+}
+
+// Generic end statement - used to close any block
+end_stmt = { ^"end" }
+
+// ==================
+// Comments
+// ==================
+
+comment_stmt = { "%%" ~ (!NEWLINE ~ ANY)* }
+
+// ==================
+// Title and Accessibility
+// ==================
+
+title_stmt = {
+    ^"title" ~ ":"? ~ line_content
+}
+
+acc_title_stmt = {
+    ^"accTitle" ~ ":" ~ line_content
+}
+
+acc_descr_stmt = {
+    acc_descr_single | acc_descr_multi
+}
+
+acc_descr_single = {
+    ^"accDescr" ~ ":" ~ line_content
+}
+
+acc_descr_multi = {
+    ^"accDescr" ~ "{" ~ multiline_content ~ "}"
+}
+
+line_content = @{ (!NEWLINE ~ ANY)* }
+multiline_content = @{ (!"}" ~ ANY)* }
+
+// ==================
+// Participants
+// ==================
+
+participant_stmt = {
+    participant_type ~ actor_name ~ participant_metadata? ~ alias_def?
+}
+
+participant_type = { ^"participant" | ^"actor" | ^"boundary" | ^"control" | ^"entity" | ^"database" | ^"collections" | ^"queue" }
+
+// Participant metadata like @{ "type": "actor" }
+participant_metadata = { "@" ~ json_object }
+
+json_object = @{
+    "{" ~ json_inner ~ "}"
+}
+
+json_inner = @{
+    (json_string | json_nested | !("{" | "}") ~ ANY)*
+}
+
+json_string = @{
+    "\"" ~ (!"\"" ~ ANY | "\\\"")* ~ "\""
+}
+
+json_nested = @{
+    "{" ~ json_inner ~ "}"
+}
+
+// Actor name - dashes are allowed but not when followed by arrow characters
+actor_name = @{
+    (ASCII_ALPHANUMERIC | "_" | "=" | "." | dash_in_name)+
+}
+
+// A dash that is part of the name (not followed by arrow continuations)
+// Must NOT be followed by: >, x, ), - (which are arrow characters)
+dash_in_name = @{ "-" ~ &safe_after_dash }
+safe_after_dash = _{ !((">" | "x" | ")" | "-") ~ ANY) ~ ASCII_ALPHA }
+
+alias_def = { ^"as" ~ actor_description }
+
+// Actor description consumes until actual newline (not semicolon, to allow entities like #lt;)
+actor_description = @{
+    (!("\r\n" | "\n") ~ ANY)+
+}
+
+// ==================
+// Boxes
+// ==================
+
+box_start = {
+    ^"box" ~ box_color? ~ box_title?
+}
+
+box_color = @{
+    "#" ~ (ASCII_ALPHANUMERIC){3,8} | "rgb(" ~ (!")" ~ ANY)* ~ ")" | "transparent"
+}
+
+box_title = @{
+    (!(NEWLINE | ";") ~ ANY)+
+}
+
+// ==================
+// Autonumber
+// ==================
+
+autonumber_stmt = {
+    ^"autonumber" ~ autonumber_args?
+}
+
+autonumber_args = {
+    (^"off" | number ~ number?)
+}
+
+number = @{ ASCII_DIGIT+ }
+
+// ==================
+// Activation/Deactivation
+// ==================
+
+activate_stmt = {
+    ^"activate" ~ actor_name
+}
+
+deactivate_stmt = {
+    ^"deactivate" ~ actor_name
+}
+
+// ==================
+// Control Structures
+// ==================
+
+loop_start = {
+    ^"loop" ~ loop_text?
+}
+
+loop_text = @{
+    (!(NEWLINE | ";") ~ ANY)+
+}
+
+alt_start = {
+    ^"alt" ~ alt_text?
+}
+
+alt_else = {
+    ^"else" ~ alt_text?
+}
+
+alt_text = @{
+    (!(NEWLINE | ";") ~ ANY)+
+}
+
+opt_start = {
+    ^"opt" ~ opt_text?
+}
+
+opt_text = @{
+    (!(NEWLINE | ";") ~ ANY)+
+}
+
+par_start = {
+    ^"par" ~ par_text?
+}
+
+par_and = {
+    ^"and" ~ par_text?
+}
+
+par_text = @{
+    (!(NEWLINE | ";") ~ ANY)+
+}
+
+critical_start = {
+    ^"critical" ~ critical_text?
+}
+
+critical_option = {
+    ^"option" ~ critical_text?
+}
+
+critical_text = @{
+    (!(NEWLINE | ";") ~ ANY)+
+}
+
+break_start = {
+    ^"break" ~ break_text?
+}
+
+break_text = @{
+    (!(NEWLINE | ";") ~ ANY)+
+}
+
+rect_start = {
+    ^"rect" ~ rect_color?
+}
+
+rect_color = @{
+    "#" ~ (ASCII_ALPHANUMERIC){3,8} | "rgb(" ~ (!")" ~ ANY)* ~ ")" | "transparent"
+}
+
+// ==================
+// Links and Properties
+// ==================
+
+links_stmt = {
+    ^"links" ~ actor_name ~ ":" ~ json_content
+}
+
+link_stmt = {
+    ^"link" ~ actor_name ~ ":" ~ link_name ~ "@" ~ link_url
+}
+
+link_name = @{
+    (!"@" ~ !":" ~ !NEWLINE ~ ANY)+
+}
+
+link_url = @{
+    (!NEWLINE ~ !";'" ~ ANY)+
+}
+
+properties_stmt = {
+    ^"properties" ~ actor_name ~ ":" ~ json_content
+}
+
+json_content = @{
+    "{" ~ (!"}" ~ ANY)* ~ "}"
+}
+
+// ==================
+// Create/Destroy
+// ==================
+
+create_stmt = {
+    ^"create" ~ participant_type ~ actor_name ~ participant_metadata? ~ alias_def?
+}
+
+destroy_stmt = {
+    ^"destroy" ~ actor_name
+}
+
+// ==================
+// Notes
+// ==================
+
+note_stmt = {
+    ^"note" ~ note_placement ~ note_separator ~ note_text
+}
+
+note_placement = {
+    (^"left" ~ ^"of" | ^"leftof") ~ actor_name |
+    (^"right" ~ ^"of" | ^"rightof") ~ actor_name |
+    ^"over" ~ actor_list
+}
+
+// Comma-separated list of actors for "over" notes
+actor_list = { actor_name ~ ("," ~ actor_name)* }
+
+note_separator = _{ ":" }
+
+// Note text consumes until actual newline (not semicolon, to allow entities like #lt;)
+note_text = @{
+    (!("\r\n" | "\n") ~ ANY)+
+}
+
+// ==================
+// Messages
+// ==================
+
+message_stmt = {
+    actor_ref ~ arrow_type ~ actor_ref ~ message_separator ~ message_text
+}
+
+// Actor reference - activation markers only BEFORE actor name
+// Arrows like ->>+ and ->>- handle trailing activation
+actor_ref = {
+    activation_marker? ~ actor_name
+}
+
+activation_marker = { "+" | "-" }
+
+// Arrow types - IMPORTANT: longer patterns first!
+arrow_type = @{
+    // Central connection arrows (bidirectional with ())
+    "()->>()-" | "()->>()+" | "()-->>()-" | "()-->>()+" |
+    "()-x()-" | "()-x()+" | "()--x()-" | "()--x()+" |
+    "()-->>()" | "()-x()" | "()--x()" |
+    "()->>()" |  // Central connection solid open arrow
+    "()->()" |   // Central connection solid arrow (no >>)
+    // Central connection to regular actor (no trailing ())
+    "()-->>-" | "()-->>+" | "()-->>"|
+    "()->>-" | "->>()+" | "()->>" |
+    "()-->-" | "()-->+" | "()-->" |
+    "()->-" | "()->+" | "()->" |
+    "()-x-" | "()-x+" | "()-x" |
+    "()--x-" | "()--x+" | "()--x" |
+    // Bidirectional arrows with central connection
+    "()<<->>()-" | "()<<->>()+" | "()<<-->>()-" | "()<<-->>()+" |
+    "()<<->>()" | "()<<-->>()" |
+    // Standard bidirectional arrows
+    "<<->>-" | "<<->>+" | "<<-->>-" | "<<-->>+" |
+    "<<->>" | "<<-->>" |
+    // Central connection single-side
+    "->>()-" | "->>()+" | "-->>()-" | "-->>()+" |
+    "-x()-" | "-x()+" | "--x()-" | "--x()+" |
+    "->>(" | "-->>(" | "-)(" | "--)(" |
+    // Half arrows - solid (with |) - dotted (longer patterns first)
+    // Double-backslash variants (for escaped test data) must come before single-backslash
+    "\\\\|--" | "/|--" | "\\|--" |       // Solid half arrow reverse dotted
+    "--|/" | "--|\\\\" | "--|\\" |       // Solid half arrow dotted
+    "\\\\|-" | "/|-" | "\\|-" |          // Solid half arrow reverse
+    "-|/" | "-|\\\\" | "-|\\" |          // Solid half arrow
+    // Half arrows - stick (no |) - dotted (longer patterns first)
+    "\\\\\\\\--" | "//--" | "\\\\--" |   // Stick half arrow reverse dotted
+    "--//" | "--\\\\\\\\" | "--\\\\" |   // Stick half arrow dotted
+    "\\\\\\\\-" | "//-" | "\\\\-" |      // Stick half arrow reverse
+    "-//" | "-\\\\\\\\" | "-\\\\" |      // Stick half arrow
+    // Standard arrows - longer first
+    "->>-" | "->>+" | "-->>-" | "-->>+" |
+    "->-" | "->+" | "-->-" | "-->+" |
+    "-x-" | "-x+" | "--x-" | "--x+" |
+    "-)-" | "-)+" | "--)-" | "--)+" |
+    // Standard arrows without activation
+    "->>" | "-->>" |
+    "->" | "-->" |
+    "-x" | "--x" |
+    "-)" | "--)"
+}
+
+message_separator = _{ ":" }
+
+// Message text consumes until actual newline (not semicolon, to allow entities like #lt;)
+message_text = @{
+    (!("\r\n" | "\n") ~ ANY)*
+}
+
+// ==================
+// Primitives
+// ==================
+
+WHITESPACE = _{ " " | "\t" }
+NEWLINE = _{ "\r\n" | "\n" | ";" }

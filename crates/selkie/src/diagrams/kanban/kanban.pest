@@ -1,0 +1,180 @@
+// Kanban diagram grammar for mermaid diagrams
+// Based on mermaid.js jison grammar
+
+// ==================
+// Top-level structure
+// ==================
+
+diagram = { SOI ~ leading_content* ~ keyword_kanban ~ document ~ EOI }
+
+// Allow comments, spaces and newlines before the keyword
+leading_content = _{ leading_comment | space_line | newline }
+leading_comment = _{ "%%" ~ (!newline ~ ANY)* ~ newline? }
+space_line = _{ " "+ ~ newline }
+
+keyword_kanban = _{ ^"kanban" }
+
+document = { (newline | empty_line | trailing_ws | statement)* }
+
+// Lines with only whitespace (followed by newline)
+empty_line = _{ ws+ ~ &newline }
+
+// Trailing whitespace at EOF
+trailing_ws = _{ ws+ ~ &EOI }
+
+// ==================
+// Statements
+// ==================
+
+statement = {
+    comment_stmt
+    | class_decorator
+    | icon_decorator
+    | node_stmt
+}
+
+// ==================
+// Comments
+// ==================
+
+comment_stmt = { ws* ~ "%%" ~ (!newline ~ ANY)* }
+
+// ==================
+// Nodes
+// ==================
+
+node_stmt = {
+    indent ~ node ~ ws* ~ metadata?
+}
+
+indent = @{ " "* }
+
+node = {
+    node_with_id | node_without_id
+}
+
+node_with_id = {
+    node_id ~ ws* ~ node_shape?
+}
+
+node_without_id = {
+    node_shape
+}
+
+node_id = @{
+    (ASCII_ALPHANUMERIC | "_" | "-")+
+}
+
+// ==================
+// Node shapes
+// ==================
+
+node_shape = {
+    hexagon_shape
+    | double_circle_shape
+    | circle_shape
+    | cloud_shape
+    | bang_shape
+    | square_shape
+    | rounded_shape
+}
+
+square_shape = { "[" ~ node_descr ~ "]" }
+rounded_shape = { "(" ~ node_descr ~ ")" }
+circle_shape = { "((" ~ node_descr ~ "))" }
+double_circle_shape = { "(((" ~ node_descr ~ ")))" }
+hexagon_shape = { "{{" ~ node_descr ~ "}}" }
+cloud_shape = { "(-" ~ node_descr ~ "-)" }
+bang_shape = { "-)" ~ node_descr ~ "(-" }
+
+node_descr = {
+    quoted_descr | md_descr | raw_descr
+}
+
+quoted_descr = @{
+    "\"" ~ inner_quoted ~ "\""
+}
+
+inner_quoted = @{
+    (!"\"" ~ ANY)*
+}
+
+md_descr = @{
+    "\"`" ~ (!"`\"" ~ ANY)* ~ "`\""
+}
+
+raw_descr = @{
+    (!(")" | "]" | "}" | "-)" | "(-") ~ ANY)+
+}
+
+// ==================
+// Decorators
+// ==================
+
+icon_decorator = {
+    indent ~ "::icon(" ~ icon_name ~ ")"
+}
+
+icon_name = @{
+    (!(")" | newline) ~ ANY)+
+}
+
+class_decorator = {
+    indent ~ ":::" ~ class_list
+}
+
+class_list = @{
+    (!newline ~ ANY)+
+}
+
+// ==================
+// Metadata (shape data)
+// ==================
+
+metadata = {
+    "@{" ~ metadata_content ~ "}"
+}
+
+metadata_content = {
+    metadata_ws* ~ (metadata_item ~ (metadata_sep ~ metadata_item)*)? ~ metadata_ws*
+}
+
+// Separator between metadata items: comma or newline (with optional surrounding whitespace)
+metadata_sep = _{ metadata_ws* ~ ("," | newline) ~ metadata_ws* }
+
+metadata_item = {
+    metadata_key ~ inner_ws* ~ ":" ~ inner_ws* ~ metadata_value
+}
+
+// Whitespace inside metadata block (can include newlines at block boundaries)
+metadata_ws = _{ " " | "\t" | newline }
+
+// Inner whitespace within a metadata item (horizontal only)
+inner_ws = _{ " " | "\t" }
+
+metadata_key = @{
+    (ASCII_ALPHA | "_")+
+}
+
+metadata_value = {
+    unquoted_value | single_quoted_value | double_quoted_value
+}
+
+single_quoted_value = @{
+    "'" ~ (!"'" ~ ANY)* ~ "'"
+}
+
+double_quoted_value = @{
+    "\"" ~ (!"\"" ~ ANY)* ~ "\""
+}
+
+unquoted_value = @{
+    (ASCII_ALPHANUMERIC | "_" | "-" | ":" | ".")+
+}
+
+// ==================
+// Primitives
+// ==================
+
+ws = _{ " " | "\t" }
+newline = _{ "\r\n" | "\n" }

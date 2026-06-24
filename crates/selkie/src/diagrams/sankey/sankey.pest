@@ -1,0 +1,65 @@
+// Sankey diagram grammar for mermaid diagrams
+// Based on mermaid.js jison grammar
+// Uses CSV format (RFC 4180 with 3 columns: source, target, value)
+
+// ==================
+// Top-level structure
+// ==================
+
+diagram = { SOI ~ leading_content* ~ keyword_sankey ~ document ~ EOI }
+
+// Allow comments, spaces and newlines before the keyword
+leading_content = _{ leading_comment | NEWLINE }
+leading_comment = _{ "%%" ~ (!NEWLINE ~ ANY)* ~ NEWLINE? }
+
+keyword_sankey = _{ ^"sankey-beta" | ^"sankey" }
+
+document = { (NEWLINE | statement)* }
+
+// ==================
+// Statements
+// ==================
+
+statement = {
+    comment_stmt
+    | record
+}
+
+// ==================
+// Comments
+// ==================
+
+comment_stmt = { "%%" ~ (!NEWLINE ~ ANY)* }
+
+// ==================
+// CSV Record (3 fields: source, target, value)
+// ==================
+
+record = {
+    field ~ "," ~ field ~ "," ~ field
+}
+
+field = {
+    escaped_field | non_escaped_field
+}
+
+// Quoted field - can contain commas, newlines, and escaped quotes
+escaped_field = @{
+    "\"" ~ inner_escaped ~ "\""
+}
+
+inner_escaped = @{
+    (!"\"" ~ ANY | "\"\"")*
+}
+
+// Non-quoted field - cannot contain comma, quote, or newline
+non_escaped_field = @{
+    (!("," | "\"" | NEWLINE) ~ ANY)*
+}
+
+// ==================
+// Primitives
+// ==================
+
+WHITESPACE = _{ " " | "\t" }
+NEWLINE = _{ "\r\n" | "\n" }

@@ -1,0 +1,29 @@
+# doc-crate — testing-first front-end over the docpane render core.
+# Its primary job is doc-testing: render a markdown file to a PNG
+# headlessly (no window), full document height, for review and
+# snapshot diffing. Shares the exact render core the in-window
+# `igui::doc_pane` uses, so the two never drift. Vendored from
+# NewFactor's `crates/doc-crate`; joined to NCL's top-level workspace.
+
+[package]
+name = "doc-crate"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "doc-crate"
+path = "src/main.rs"
+
+[dependencies]
+docpane = { path = "../docpane" }
+
+[dependencies.windows]
+version = "0.62"
+features = [
+  "Win32_Foundation",
+  "Win32_Graphics_Direct2D",
+  "Win32_Graphics_Direct2D_Common",
+  "Win32_Graphics_Dxgi_Common",
+  "Win32_Graphics_Imaging",
+  "Win32_System_Com",
+]

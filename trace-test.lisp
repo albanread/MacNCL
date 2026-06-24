@@ -1,0 +1,6 @@
+(require 'trace)
+(defun fact (n) (if (<= n 1) 1 (* n (fact (- n 1)))))
+(trace fact)
+(format t "fact 4 = ~A~%" (fact 4))
+(untrace fact)
+(format t "after untrace, fact 3 = ~A~%" (fact 3))

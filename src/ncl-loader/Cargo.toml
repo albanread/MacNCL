@@ -1,0 +1,22 @@
+[package]
+name = "ncl-loader"
+version = "0.0.0"
+edition = "2024"
+
+[features]
+default = ["gc-page-heap"]
+gc-page-heap = [
+    "ncl-runtime/gc-page-heap",
+    "ncl-compiler/gc-page-heap",
+    "ncl-llvm/gc-page-heap",
+    "ncl-reader/gc-page-heap",
+]
+
+[dependencies]
+ncl-compiler = { path = "../ncl-compiler", default-features = false }
+ncl-llvm = { path = "../ncl-llvm", default-features = false }
+ncl-reader = { path = "../ncl-reader", default-features = false }
+ncl-runtime = { path = "../ncl-runtime", default-features = false }
+
+[lints]
+workspace = true

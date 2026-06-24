@@ -1,0 +1,11 @@
+(require 'threads)
+(defun simple-worker ()
+  (format t "[worker] before exit-thread~%")
+  (exit-thread)
+  (format t "[worker] AFTER exit-thread (should not print)~%"))
+
+(let ((tid (create-thread #'simple-worker)))
+  (sleep 0.1)
+  (join-thread tid)
+  (format t "main: joined~%"))
+(format t "DONE~%")

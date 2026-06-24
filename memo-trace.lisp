@@ -1,0 +1,7 @@
+(require 'trace)
+(require 'memoize)
+(defun fib (n) (if (<= n 1) n (+ (fib (- n 1)) (fib (- n 2)))))
+(memoize fib)
+(trace fib)
+(format t "~%fib 5 below (memoized + traced)~%")
+(format t "result = ~A~%" (fib 5))

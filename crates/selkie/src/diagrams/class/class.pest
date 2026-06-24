@@ -1,0 +1,304 @@
+// Class Diagram grammar for mermaid diagrams
+// Based on mermaid.js classDiagram.jison
+
+// ==================
+// Top-level structure
+// ==================
+
+diagram = { SOI ~ leading_content* ~ keyword_class_diagram ~ document ~ EOI }
+
+// Allow comments and newlines before the classDiagram keyword
+leading_content = _{ leading_comment | NEWLINE }
+leading_comment = _{ "%%" ~ (!NEWLINE ~ ANY)* ~ NEWLINE? }
+
+keyword_class_diagram = _{ "classDiagram" ~ "-v2"? }
+
+document = { (NEWLINE | statement)* }
+
+// ==================
+// Statements
+// ==================
+
+statement = {
+    comment_stmt
+    | direction_stmt
+    | acc_title_stmt
+    | acc_descr_stmt
+    | namespace_stmt
+    | class_def_stmt
+    | css_class_stmt
+    | style_stmt
+    | click_stmt
+    | link_stmt
+    | callback_stmt
+    | note_stmt
+    | annotation_stmt
+    | relationship_stmt
+    | member_stmt
+    | class_stmt
+}
+
+// ==================
+// Comments
+// ==================
+
+comment_stmt = { "%%" ~ (!NEWLINE ~ ANY)* }
+
+// ==================
+// Direction
+// ==================
+
+direction_stmt = {
+    "direction" ~ direction
+}
+
+direction = { "TB" | "BT" | "LR" | "RL" }
+
+// ==================
+// Accessibility
+// ==================
+
+acc_title_stmt = {
+    "accTitle" ~ ":" ~ line_content
+}
+
+acc_descr_stmt = {
+    acc_descr_single | acc_descr_multi
+}
+
+acc_descr_single = {
+    "accDescr" ~ ":" ~ line_content
+}
+
+acc_descr_multi = {
+    "accDescr" ~ "{" ~ multiline_content ~ "}"
+}
+
+line_content = @{ (!NEWLINE ~ ANY)* }
+multiline_content = @{ (!"}" ~ ANY)* }
+
+// ==================
+// Namespaces
+// ==================
+
+namespace_stmt = {
+    "namespace" ~ namespace_name ~ "{" ~ namespace_body ~ "}"
+}
+
+namespace_name = @{
+    backticked_name | simple_namespace_name
+}
+
+simple_namespace_name = @{
+    (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | "-" | ".")*
+}
+
+namespace_body = {
+    (NEWLINE | namespace_statement)*
+}
+
+namespace_statement = {
+    comment_stmt
+    | class_stmt
+    | relationship_stmt
+    | note_stmt
+}
+
+// ==================
+// Class definitions
+// ==================
+
+class_stmt = {
+    "class" ~ class_name ~ generic_type? ~ text_label? ~ css_shorthand? ~ class_body?
+}
+
+// Simpler inline class (no "class" keyword)
+inline_class = {
+    class_name ~ generic_type? ~ text_label? ~ css_shorthand?
+}
+
+class_name = @{
+    backticked_name | simple_class_name
+}
+
+backticked_name = @{ "`" ~ (!"`" ~ ANY)+ ~ "`" }
+
+simple_class_name = @{
+    (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | "-")*
+}
+
+generic_type = @{ "~" ~ (!"~" ~ ANY)+ ~ "~" }
+
+text_label = { "[" ~ quoted_text ~ "]" }
+
+quoted_text = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+
+css_shorthand = { ":::" ~ identifier }
+
+// ==================
+// Class body
+// ==================
+
+class_body = {
+    "{" ~ BLOCK_WS* ~ (class_body_line ~ BLOCK_WS*)* ~ "}"
+}
+
+// Whitespace inside class blocks includes newlines
+BLOCK_WS = _{ " " | "\t" | "\r\n" | "\n" }
+
+class_body_line = {
+    bracket_comment | annotation_line | separator_line | member_line
+}
+
+bracket_comment = @{ "%%" ~ (!NEWLINE ~ ANY)* }
+
+// Support both << >> and HTML entities &lt;&lt; &gt;&gt;
+annotation_line = { annotation_open ~ annotation_text ~ annotation_close }
+
+annotation_open = _{ "<<" | "&lt;&lt;" }
+annotation_close = _{ ">>" | "&gt;&gt;" }
+
+annotation_text = @{ (!(">>" | "&gt;&gt;") ~ ANY)+ }
+
+separator_line = @{ ".." ~ (!NEWLINE ~ ANY)* | "==" ~ (!NEWLINE ~ ANY)* | "__" ~ (!NEWLINE ~ ANY)* | "--" ~ (!NEWLINE ~ ANY)* }
+
+member_line = @{
+    (!("}" | NEWLINE) ~ ANY)+
+}
+
+// ==================
+// Member statements (colon syntax)
+// ==================
+
+member_stmt = {
+    class_name ~ generic_type? ~ ":" ~ member_text
+}
+
+member_text = @{ (!NEWLINE ~ ANY)+ }
+
+// ==================
+// Relationships
+// ==================
+
+relationship_stmt = {
+    class_ref ~ cardinality_left? ~ rel_type ~ cardinality_right? ~ class_ref ~ (":" ~ relation_label)?
+}
+
+class_ref = {
+    class_name ~ generic_type? ~ css_shorthand?
+}
+
+cardinality_left = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+cardinality_right = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+
+// Relationship types - IMPORTANT: longer patterns must come first!
+rel_type = @{
+    // Bidirectional inheritance (longest)
+    "<|--|>" | "<|..|>" |
+    // Bidirectional (other)
+    "*--*" | "<-->" |
+    // Extension (inheritance)
+    "<|--" | "--|>" | "<|.." | "..|>" |
+    // Composition
+    "*--" | "--*" | "*.." | "..*" |
+    // Aggregation
+    "o--" | "--o" | "o.." | "..o" |
+    // Dependency arrows
+    "<--" | "-->" | "<.." | "..>" |
+    // Lollipop (interface notation) - ()-- and --(o)
+    "()--" | "--()" | "--o)" | "o)--" |
+    // Simple lines (shortest - must be last)
+    "--" | ".."
+}
+
+relation_label = @{ (!NEWLINE ~ ANY)+ }
+
+// ==================
+// Annotations
+// ==================
+
+annotation_stmt = {
+    annotation_open ~ annotation_text ~ annotation_close ~ class_name
+}
+
+// ==================
+// Notes
+// ==================
+
+note_stmt = {
+    note_for_stmt | note_general_stmt
+}
+
+note_for_stmt = {
+    "note" ~ "for" ~ class_name ~ note_content
+}
+
+note_general_stmt = {
+    "note" ~ note_content
+}
+
+// Note content is a quoted string that allows internal quotes (for HTML content)
+// It starts with " and consumes until " followed by end of line or end of input
+note_content = @{ "\"" ~ (!("\"" ~ (NEWLINE | EOI)) ~ ANY)* ~ "\"" }
+
+// ==================
+// Click/Link/Callback
+// ==================
+
+click_stmt = {
+    "click" ~ class_name ~ ("href" ~ quoted_text ~ quoted_text? ~ target? | "call" ~ callback_def ~ quoted_text?)
+}
+
+link_stmt = {
+    "link" ~ class_name ~ quoted_text ~ quoted_text? ~ target?
+}
+
+callback_stmt = {
+    "callback" ~ class_name ~ quoted_text ~ quoted_text?
+}
+
+callback_def = @{
+    identifier ~ "(" ~ (!")" ~ ANY)* ~ ")"
+}
+
+target = { "_self" | "_blank" | "_parent" | "_top" }
+
+// ==================
+// Style definitions
+// ==================
+
+class_def_stmt = {
+    "classDef" ~ identifier ~ style_list
+}
+
+css_class_stmt = {
+    "cssClass" ~ quoted_class_list ~ identifier
+}
+
+style_stmt = {
+    "style" ~ id_list ~ style_list
+}
+
+quoted_class_list = @{ "\"" ~ (!"\"" ~ ANY)* ~ "\"" }
+
+id_list = {
+    identifier ~ ("," ~ identifier)*
+}
+
+identifier = @{
+    (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | "-" | "*")*
+}
+
+style_list = @{
+    (!(NEWLINE | ";") ~ ANY)+
+}
+
+// ==================
+// Primitives
+// ==================
+
+// Line continuation: backslash followed by newline is treated as whitespace
+LINE_CONTINUATION = _{ "\\" ~ ("\r\n" | "\n") }
+
+WHITESPACE = _{ " " | "\t" | LINE_CONTINUATION }
+NEWLINE = _{ "\r\n" | "\n" | ";" }

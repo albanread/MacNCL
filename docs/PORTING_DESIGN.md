@@ -219,14 +219,53 @@ recover the GC's lazy-commit behaviour the Box fallback loses.
 
 ---
 
-## 7. Open questions for the user
+## 7. Decisions (locked 2026-06-24)
 
-1. **Repo strategy** — is MacNCL a *hard fork* that diverges, or a Mac *shim layer*
-   we intend to upstream into NewCL (single tree, `cfg(target_os)`)? The MANIFESTO's
-   whole design points at the latter; a hard fork will rot against upstream.
-2. **`new-asm` source** — can you provide the real `new-asm` crate, or do we vendor a
-   stub and treat `defasm` as unsupported-on-ARM for now?
-3. **2D renderer** — option A (Core Graphics/Core Text), B (wgpu/vello), or C (Skia)?
-   Drives the bulk of Phase 2.
-4. **Cross-platform ambition** — should the Mac renderer also become the *future*
-   Windows renderer (favouring B/C), or is Mac-native fidelity the only goal (A)?
+1. **Repo strategy: hard fork.** MacNCL is a full copy of NewCL that diverges. We
+   re-point the out-of-tree path deps (`new-asm`, `newaudio`) to in-repo locations so
+   the fork is self-contained. Upstream re-sync is manual.
+2. **`new-asm`: vendor a stub.** `crates/new-asm` keeps the type surface
+   (`AsmProc`/`AsmParam`/`AsmType`/`AsmRetType`/`build_module_asm_string`) so
+   `ncl-compiler`/`ncl-llvm` compile unchanged; `defasm` raises an "unsupported on this
+   architecture" Lisp error. Real AAPCS64 codegen is deferred to Phase 3.
+3. **2D renderer: Core Graphics + Core Text**, into a Metal `CAMetalLayer` surface.
+   Apple-native, ~1:1 with Direct2D/DirectWrite, smallest gap, no heavy deps.
+4. **Scope: Mac-native fidelity** (not a cross-platform renderer). Reinforces #3.
+
+**Active work:** Phase 0 + Phase 1 — get the headless core building and JITing on
+Apple Silicon. No GUI.
+
+## 7a. Phase 0/1 results (2026-06-24) — core works on Apple Silicon ✅
+
+The headless core builds, boots, JITs, and runs on `aarch64-apple-darwin`. What it took:
+
+- **Toolchain:** `LLVM_SYS_221_PREFIX=/opt/homebrew/opt/llvm`; inkwell features
+  `+target-aarch64`; vendored `crates/new-asm` stub; repointed/removed out-of-repo
+  path deps (`new-asm`, `newaudio`). The `ncl` binary links LLVM 22.1 statically and
+  is a native arm64 Mach-O.
+- **`ncl-runtime` compiled unchanged** — the `win_*` files were already `cfg`-gated;
+  the Box-backed (non-`VirtualAlloc`) GC static area + mutator paths just work.
+- **One code fix:** `jit_mm::make_mm()` returns a **null MM** off-Windows (§3.4), so
+  MCJIT uses LLVM's default `SectionMemoryManager`. This was the only runtime blocker.
+
+**Validation (all on Apple Silicon):**
+- `(+ 1 2)`, `(fact 30)` → exact bignum, `(fib 30)`, Ackermann, CLOS
+  `defclass`/`make-instance`/accessors, `format`, 1000-entry hash tables, and a
+  1,000,000-iteration `double-float` `sqrt` kernel — all correct.
+- **`bench/gauntlet.lisp` → GAUNTLET ALL-PASS**, including every float-unboxing test
+  (the unboxing optimization pass is correct on ARM).
+- **`tests/ncl-tests` pass** (characters, closures, declare-special, describe, …).
+
+### §8 — Apple Silicon concurrent-JIT W^X hazard (important)
+Running the libtest harness multi-threaded, the `describe` binary aborts (SIGABRT)
+after a few tests; **single-threaded it passes 14/14.** Cause: on Apple Silicon the
+JIT write-protect toggle (`pthread_jit_write_protect_np`) is **per-thread**, so two
+threads JIT-compiling concurrently in one process corrupt each other's W^X state.
+
+- **Tests:** worked around via `RUST_TEST_THREADS=1` in `.cargo/config.toml`.
+- **Shipping binary:** unaffected — `ncl` runs Lisp on a single worker thread.
+- **Deeper implication (Phase 3):** NCL's multi-mutator design lets Lisp `make-thread`
+  spawn threads that could JIT concurrently. On Apple Silicon that needs either a
+  global lock around MCJIT compile/finalize, or correct per-thread
+  `pthread_jit_write_protect_np(false/true)` bracketing around code emission. Track as
+  a real item before multi-threaded Lisp programs are supported on Apple Silicon.

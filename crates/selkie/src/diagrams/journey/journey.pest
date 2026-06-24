@@ -1,0 +1,102 @@
+// User journey diagram grammar for mermaid diagrams
+// Based on mermaid.js journey parser
+
+// ==================
+// Top-level structure
+// ==================
+
+diagram = { SOI ~ leading_content* ~ keyword_journey ~ document ~ EOI }
+
+// Allow comments and newlines before the keyword
+leading_content = _{ leading_comment | NEWLINE }
+leading_comment = _{ "%%" ~ (!NEWLINE ~ ANY)* ~ NEWLINE? }
+
+keyword_journey = _{ ^"journey" }
+
+document = { (NEWLINE | statement)* }
+
+// ==================
+// Statements
+// ==================
+
+statement = {
+    comment_stmt
+    | title_stmt
+    | acc_title_stmt
+    | acc_descr_stmt
+    | section_stmt
+    | task_stmt
+}
+
+// ==================
+// Comments
+// ==================
+
+comment_stmt = { "%%" ~ (!NEWLINE ~ ANY)* }
+
+// ==================
+// Title
+// ==================
+
+title_stmt = {
+    ^"title" ~ line_content
+}
+
+// ==================
+// Accessibility
+// ==================
+
+acc_title_stmt = {
+    ^"accTitle" ~ ":" ~ line_content
+}
+
+acc_descr_stmt = {
+    acc_descr_single | acc_descr_multi
+}
+
+acc_descr_single = {
+    ^"accDescr" ~ ":" ~ line_content
+}
+
+acc_descr_multi = {
+    ^"accDescr" ~ "{" ~ multiline_content ~ "}"
+}
+
+line_content = @{ (!NEWLINE ~ ANY)* }
+multiline_content = @{ (!"}" ~ ANY)* }
+
+// ==================
+// Section
+// ==================
+
+section_stmt = {
+    ^"section" ~ section_name
+}
+
+section_name = @{
+    (!NEWLINE ~ ANY)+
+}
+
+// ==================
+// Tasks
+// ==================
+
+// Task format: Task name: score: actor1, actor2, ...
+task_stmt = {
+    task_name ~ ":" ~ task_data
+}
+
+task_name = @{
+    (!":" ~ !NEWLINE ~ ANY)+
+}
+
+task_data = @{
+    (!NEWLINE ~ ANY)*
+}
+
+// ==================
+// Primitives
+// ==================
+
+WHITESPACE = _{ " " | "\t" }
+NEWLINE = _{ "\r\n" | "\n" }

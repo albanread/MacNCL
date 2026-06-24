@@ -1,0 +1,214 @@
+// Block diagram grammar for mermaid diagrams
+// Based on mermaid.js block parser
+
+// ==================
+// Top-level structure
+// ==================
+
+diagram = { SOI ~ leading_content* ~ keyword_block ~ document ~ EOI }
+
+// Allow comments and newlines before the keyword
+leading_content = _{ leading_comment | NEWLINE }
+leading_comment = _{ "%%" ~ (!NEWLINE ~ ANY)* ~ NEWLINE? }
+
+keyword_block = _{ ^"block-beta" | ^"block" }
+
+document = { (NEWLINE | statement)* }
+
+// ==================
+// Statements
+// ==================
+
+statement = {
+    comment_stmt
+    | columns_stmt
+    | class_def_stmt
+    | class_stmt
+    | style_stmt
+    | composite_block
+    | space_stmt
+    | edge_stmt
+    | block_stmt
+}
+
+// ==================
+// Comments
+// ==================
+
+comment_stmt = { "%%" ~ (!NEWLINE ~ ANY)* }
+
+// ==================
+// Columns
+// ==================
+
+columns_stmt = {
+    ^"columns" ~ (^"auto" | column_count)
+}
+
+column_count = @{ ASCII_DIGIT+ }
+
+// ==================
+// Blocks
+// ==================
+
+block_stmt = {
+    block_id ~ shape_with_label? ~ width_spec? ~ arrow_dirs?
+}
+
+block_id = @{
+    // Must not be "end" keyword
+    !^"end" ~ (ASCII_ALPHANUMERIC | "_" | "-" | ".")+
+}
+
+shape_with_label = {
+    // Order matters - try more specific/longer patterns first
+    double_circle_shape    // (((...)))
+    | circle_shape         // ((...))
+    | stadium_shape        // ([...])
+    | subroutine_shape     // [[...]]
+    | cylinder_shape       // [(...))]
+    | hexagon_shape        // {{...}}
+    | square_shape         // [...]
+    | round_shape          // (...)
+    | diamond_shape        // {...}
+    | parallelogram_shape
+    | block_arrow_shape
+}
+
+// Shape definitions with different delimiters
+square_shape = { "[" ~ node_label ~ "]" }
+round_shape = { "(" ~ node_label ~ ")" }
+stadium_shape = { "([" ~ node_label ~ "])" }
+subroutine_shape = { "[[" ~ node_label ~ "]]" }
+cylinder_shape = { "[(" ~ node_label ~ ")]" }
+circle_shape = { "((" ~ node_label ~ "))" }
+double_circle_shape = { "(((" ~ node_label ~ ")))" }
+diamond_shape = { "{" ~ node_label ~ "}" }
+hexagon_shape = { "{{" ~ node_label ~ "}}" }
+parallelogram_shape = { "[/" ~ node_label ~ "/]" | "[\\" ~ node_label ~ "\\]" }
+trapezoid_shape = { "[/" ~ node_label ~ "\\]" | "[\\" ~ node_label ~ "/]" }
+block_arrow_shape = { "<[" ~ node_label ~ "]>" }
+
+node_label = {
+    quoted_string | md_string | raw_label
+}
+
+raw_label = @{
+    (!("]" | ")" | "}" | NEWLINE) ~ ANY)+
+}
+
+md_string = @{
+    "\"`" ~ (!"`\"" ~ ANY)* ~ "`\""
+}
+
+width_spec = {
+    ":" ~ width_num
+}
+
+width_num = @{ ASCII_DIGIT+ }
+
+arrow_dirs = {
+    "(" ~ dir_list ~ ")"
+}
+
+dir_list = {
+    direction ~ ("," ~ direction)*
+}
+
+direction = { ^"right" | ^"left" | ^"up" | ^"down" | ^"x" | ^"y" }
+
+// ==================
+// Space blocks
+// ==================
+
+space_stmt = {
+    ^"space" ~ (":" ~ ASCII_DIGIT+)?
+}
+
+// ==================
+// Composite blocks
+// ==================
+
+composite_block = {
+    composite_start ~ NEWLINE ~ (NEWLINE | statement)* ~ end_keyword
+}
+
+composite_start = {
+    (^"block:" ~ block_id ~ shape_with_label?) | ^"block"
+}
+
+end_keyword = _{ ^"end" }
+
+// ==================
+// Edges
+// ==================
+
+edge_stmt = {
+    block_stmt ~ link ~ block_stmt
+}
+
+link = {
+    link_with_label | simple_link
+}
+
+simple_link = @{
+    ("-" ~ "-"+) ~ (">" | "x" | "o")?
+    | ("<" | "x" | "o")? ~ ("-" ~ "-"+) ~ ">"?
+    | ("=" ~ "="+) ~ (">" | "x" | "o")?
+    | ("-" ~ "."+) ~ (">" | "x" | "o")?
+}
+
+link_with_label = {
+    link_start ~ quoted_string ~ link_end
+}
+
+link_start = @{
+    "--" | "==" | "-."
+}
+
+link_end = @{
+    ("--" | "==" | ".-") ~ ">"?
+}
+
+// ==================
+// Styling
+// ==================
+
+class_def_stmt = {
+    ^"classDef" ~ class_name ~ style_list
+}
+
+class_stmt = {
+    ^"class" ~ id_list ~ class_name
+}
+
+style_stmt = {
+    ^"style" ~ id_list ~ style_list
+}
+
+class_name = @{
+    (ASCII_ALPHANUMERIC | "_" | "-")+
+}
+
+id_list = {
+    block_id ~ ("," ~ block_id)*
+}
+
+style_list = @{
+    (!NEWLINE ~ ANY)+
+}
+
+// ==================
+// Primitives
+// ==================
+
+quoted_string = @{
+    "\"" ~ inner_quoted ~ "\""
+}
+
+inner_quoted = @{
+    (!"\"" ~ ANY)*
+}
+
+WHITESPACE = _{ " " | "\t" }
+NEWLINE = _{ "\r\n" | "\n" }

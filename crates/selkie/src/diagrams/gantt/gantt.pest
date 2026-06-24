@@ -1,0 +1,213 @@
+// Gantt diagram grammar for mermaid diagrams
+// Based on mermaid.js gantt.jison
+
+// ==================
+// Top-level structure
+// ==================
+
+diagram = { SOI ~ leading_content* ~ keyword_gantt ~ document ~ EOI }
+
+// Allow comments and newlines before the keyword
+leading_content = _{ leading_comment | NEWLINE }
+leading_comment = _{ "%%" ~ (!NEWLINE ~ ANY)* ~ NEWLINE? }
+
+keyword_gantt = _{ "gantt" }
+
+document = { (NEWLINE | statement)* }
+
+// ==================
+// Statements
+// ==================
+
+statement = {
+    comment_stmt
+    | date_format_stmt
+    | axis_format_stmt
+    | tick_interval_stmt
+    | inclusive_end_dates_stmt
+    | top_axis_stmt
+    | excludes_stmt
+    | includes_stmt
+    | today_marker_stmt
+    | weekday_stmt
+    | weekend_stmt
+    | title_stmt
+    | acc_title_stmt
+    | acc_descr_stmt
+    | section_stmt
+    | click_stmt
+    | task_stmt
+}
+
+// ==================
+// Comments
+// ==================
+
+comment_stmt = { "%%" ~ (!NEWLINE ~ ANY)* }
+
+// ==================
+// Configuration statements
+// ==================
+
+date_format_stmt = {
+    ^"dateFormat" ~ format_text
+}
+
+axis_format_stmt = {
+    ^"axisFormat" ~ format_text
+}
+
+tick_interval_stmt = {
+    ^"tickInterval" ~ format_text
+}
+
+inclusive_end_dates_stmt = {
+    ^"inclusiveEndDates"
+}
+
+top_axis_stmt = {
+    ^"topAxis"
+}
+
+excludes_stmt = {
+    ^"excludes" ~ format_text
+}
+
+includes_stmt = {
+    ^"includes" ~ format_text
+}
+
+today_marker_stmt = {
+    ^"todayMarker" ~ format_text
+}
+
+format_text = @{
+    (!(NEWLINE | ";" | "#") ~ ANY)+
+}
+
+// ==================
+// Weekday/Weekend settings
+// ==================
+
+weekday_stmt = {
+    ^"weekday" ~ weekday_value
+}
+
+weekday_value = {
+    ^"monday" | ^"tuesday" | ^"wednesday" | ^"thursday" |
+    ^"friday" | ^"saturday" | ^"sunday"
+}
+
+weekend_stmt = {
+    ^"weekend" ~ weekend_value
+}
+
+weekend_value = { ^"friday" | ^"saturday" }
+
+// ==================
+// Title and Accessibility
+// ==================
+
+title_stmt = {
+    ^"title" ~ title_text
+}
+
+// Title text can contain semicolons - only stop at actual newlines
+title_text = @{
+    (!("\r\n" | "\n") ~ ANY)+
+}
+
+acc_title_stmt = {
+    ^"accTitle" ~ ":" ~ line_content
+}
+
+acc_descr_stmt = {
+    acc_descr_single | acc_descr_multi
+}
+
+acc_descr_single = {
+    ^"accDescr" ~ ":" ~ line_content
+}
+
+acc_descr_multi = {
+    ^"accDescr" ~ "{" ~ multiline_content ~ "}"
+}
+
+line_content = @{ (!NEWLINE ~ ANY)* }
+multiline_content = @{ (!"}" ~ ANY)* }
+
+// ==================
+// Sections
+// ==================
+
+section_stmt = {
+    ^"section" ~ section_text
+}
+
+// Section text can contain semicolons - only stop at actual newlines
+section_text = @{
+    (!("\r\n" | "\n") ~ ANY)+
+}
+
+// ==================
+// Click/Interactivity
+// ==================
+
+click_stmt = {
+    ^"click" ~ task_id ~ click_action+
+}
+
+task_id = @{
+    (!(WHITESPACE | NEWLINE | ";") ~ ANY)+
+}
+
+click_action = {
+    click_href | click_call
+}
+
+click_href = {
+    ^"href" ~ quoted_string
+}
+
+click_call = {
+    ^"call" ~ callback_name ~ callback_args?
+}
+
+callback_name = @{
+    (!(WHITESPACE | NEWLINE | "(" | ";") ~ ANY)+
+}
+
+callback_args = {
+    "(" ~ args_content ~ ")"
+}
+
+args_content = @{
+    (!")" ~ ANY)*
+}
+
+quoted_string = @{
+    "\"" ~ (!"\"" ~ ANY)* ~ "\""
+}
+
+// ==================
+// Tasks
+// ==================
+
+task_stmt = {
+    task_name ~ ":" ~ task_data
+}
+
+task_name = @{
+    (!":" ~ !NEWLINE ~ ANY)+
+}
+
+task_data = @{
+    (!(NEWLINE | ";" | "#") ~ ANY)+
+}
+
+// ==================
+// Primitives
+// ==================
+
+WHITESPACE = _{ " " | "\t" }
+NEWLINE = _{ "\r\n" | "\n" | ";" }

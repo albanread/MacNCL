@@ -1,0 +1,279 @@
+// State diagram grammar for mermaid diagrams
+// Based on mermaid.js stateDiagram.jison
+
+// ==================
+// Top-level structure
+// ==================
+
+diagram = { SOI ~ leading_content* ~ keyword_state_diagram ~ document ~ EOI }
+
+// Allow comments and newlines before the keyword
+leading_content = _{ leading_comment | NEWLINE }
+leading_comment = _{ "%%" ~ (!NEWLINE ~ ANY)* ~ NEWLINE? }
+
+keyword_state_diagram = _{ "stateDiagram" ~ ("-v2")? }
+
+document = { (NEWLINE | statement)* }
+
+// ==================
+// Statements
+// ==================
+
+statement = {
+    comment_stmt
+    | direction_stmt
+    | hide_empty_stmt
+    | scale_stmt
+    | acc_title_stmt
+    | acc_descr_stmt
+    | class_def_stmt
+    | class_stmt
+    | style_stmt
+    | state_declaration
+    | note_stmt
+    | transition_stmt
+    | divider_stmt
+    | state_with_description
+}
+
+// Concurrent region divider (standalone -- not followed by >)
+divider_stmt = { "--" ~ !(">" | "-") }
+
+// Standalone state with optional description (shorthand without "state" keyword)
+state_with_description = {
+    state_id ~ (":" ~ description_text)?
+}
+
+// ==================
+// Comments
+// ==================
+
+comment_stmt = { "%%" ~ (!NEWLINE ~ ANY)* }
+
+// ==================
+// Direction
+// ==================
+
+direction_stmt = {
+    ^"direction" ~ direction
+}
+
+direction = { "TB" | "BT" | "LR" | "RL" }
+
+// ==================
+// Hide empty description
+// ==================
+
+hide_empty_stmt = {
+    ^"hide" ~ ^"empty" ~ ^"description"
+}
+
+// ==================
+// Scale
+// ==================
+
+scale_stmt = {
+    ^"scale" ~ number ~ (^"width")?
+}
+
+number = @{ ASCII_DIGIT+ }
+
+// ==================
+// Accessibility
+// ==================
+
+acc_title_stmt = {
+    ^"accTitle" ~ ":" ~ line_content
+}
+
+acc_descr_stmt = {
+    acc_descr_single | acc_descr_multi
+}
+
+acc_descr_single = {
+    ^"accDescr" ~ ":" ~ line_content
+}
+
+acc_descr_multi = {
+    ^"accDescr" ~ "{" ~ multiline_content ~ "}"
+}
+
+line_content = @{ (!NEWLINE ~ ANY)* }
+multiline_content = @{ (!"}" ~ ANY)* }
+
+// ==================
+// Style classes
+// ==================
+
+class_def_stmt = {
+    ^"classDef" ~ class_name ~ style_opts
+}
+
+class_stmt = {
+    ^"class" ~ state_id_list ~ class_name
+}
+
+state_id_list = {
+    state_id ~ ("," ~ state_id)*
+}
+
+class_name = @{
+    (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_")*
+}
+
+style_opts = @{
+    (!(NEWLINE | ";") ~ ANY)+
+}
+
+// ==================
+// Style statement
+// ==================
+
+style_stmt = {
+    ^"style" ~ state_id_list ~ style_opts
+}
+
+// ==================
+// State declarations
+// ==================
+
+// Atomic rule to ensure "state" keyword isn't part of a longer name like "State1"
+// The @ makes it atomic (no implicit whitespace), so the lookahead checks immediately after "state"
+state_keyword = @{ ^"state" ~ !ASCII_ALPHANUMERIC }
+
+state_declaration = {
+    state_keyword ~ state_def
+}
+
+state_def = {
+    state_with_body | state_special | state_quoted_alias | state_alias | state_simple
+}
+
+// State with composite body
+state_with_body = {
+    (quoted_string | state_id) ~ alias? ~ "{" ~ document ~ "}"
+}
+
+// Special state types (support << >>, HTML entity &lt;&lt; &gt;&gt;, and [[ ]])
+state_special = {
+    state_id ~ (
+        ("<<" | "&lt;&lt;") ~ special_type ~ (">>" | "&gt;&gt;")
+        | "[[" ~ special_type ~ "]]"
+    )
+}
+
+special_type = { ^"fork" | ^"join" | ^"choice" }
+
+// State with quoted description and alias: state "Description" as ID
+state_quoted_alias = {
+    quoted_string ~ ^"as" ~ state_id ~ state_description?
+}
+
+// State with alias (ID to quoted): state ID as "Description"
+state_alias = {
+    state_id ~ ^"as" ~ quoted_string
+}
+
+// Simple state reference
+state_simple = {
+    state_id ~ state_description?
+}
+
+state_description = {
+    ":" ~ description_text
+}
+
+description_text = @{
+    (!(NEWLINE | ";") ~ ANY)+
+}
+
+// ==================
+// Notes
+// ==================
+
+note_stmt = {
+    ^"note" ~ note_placement ~ note_target ~ note_content
+}
+
+note_placement = {
+    ^"left" ~ ^"of" | ^"right" ~ ^"of"
+}
+
+note_target = {
+    state_id
+}
+
+note_content = {
+    note_inline | note_block
+}
+
+note_inline = {
+    ":" ~ line_content
+}
+
+note_block = {
+    NEWLINE ~ note_lines ~ ^"end" ~ ^"note"
+}
+
+// Note lines - match anything until "end note"
+// Using common case variations since ^ doesn't work in atomic rules
+note_lines = @{
+    (!("end note" | "end Note" | "End note" | "End Note" | "END NOTE" | "END note") ~ ANY)*
+}
+
+// ==================
+// Transitions
+// ==================
+
+transition_stmt = {
+    state_ref ~ arrow ~ state_ref ~ transition_label?
+}
+
+// For transitions, state_ref should NOT consume the description (since it could be a label)
+state_ref = {
+    start_end_marker | state_id
+}
+
+start_end_marker = { "[*]" }
+
+// State IDs: letters, digits, and underscores
+// - No hyphens (prevents consuming arrow prefixes like "TV--")
+// - Can start with digits (e.g., "1" is a valid state name)
+state_id = @{
+    (ASCII_ALPHA | "_" | ASCII_DIGIT) ~ (ASCII_ALPHANUMERIC | "_")*
+}
+
+arrow = @{ "-->" | "->" }
+
+transition_label = {
+    ":" ~ label_text
+}
+
+// Label text can contain semicolons (for HTML entities like #colon;)
+// Only stop at actual newlines
+label_text = @{
+    (!("\r\n" | "\n") ~ ANY)+
+}
+
+// ==================
+// Aliases and quoted strings
+// ==================
+
+alias = {
+    ^"as" ~ (quoted_string | simple_alias)
+}
+
+simple_alias = @{
+    (ASCII_ALPHA | "_") ~ (ASCII_ALPHANUMERIC | "_" | " ")*
+}
+
+quoted_string = @{
+    "\"" ~ (!"\"" ~ ANY)* ~ "\""
+}
+
+// ==================
+// Primitives
+// ==================
+
+WHITESPACE = _{ " " | "\t" }
+NEWLINE = _{ "\r\n" | "\n" | ";" }

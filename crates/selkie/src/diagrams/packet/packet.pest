@@ -1,0 +1,102 @@
+// Packet diagram grammar for mermaid diagrams
+// Based on mermaid.js langium grammar
+
+// ==================
+// Top-level structure
+// ==================
+
+diagram = { SOI ~ leading_content* ~ keyword_packet ~ document ~ EOI }
+
+// Allow comments and newlines before the keyword
+leading_content = _{ leading_comment | NEWLINE }
+leading_comment = _{ "%%" ~ (!NEWLINE ~ ANY)* ~ NEWLINE? }
+
+keyword_packet = _{ ^"packet-beta" | ^"packet" }
+
+document = { (NEWLINE | statement)* }
+
+// ==================
+// Statements
+// ==================
+
+statement = {
+    comment_stmt
+    | title_stmt
+    | acc_title_stmt
+    | acc_descr_stmt
+    | acc_descr_multiline_stmt
+    | block_stmt
+}
+
+// ==================
+// Comments
+// ==================
+
+comment_stmt = { "%%" ~ (!NEWLINE ~ ANY)* }
+
+// ==================
+// Title and Accessibility
+// ==================
+
+title_stmt = {
+    ^"title" ~ title_text
+}
+
+title_text = @{ (!NEWLINE ~ ANY)* }
+
+acc_title_stmt = {
+    ^"accTitle" ~ ":" ~ acc_title_text
+}
+
+acc_title_text = @{ (!NEWLINE ~ ANY)* }
+
+acc_descr_stmt = {
+    ^"accDescr" ~ ":" ~ acc_descr_text
+}
+
+acc_descr_text = @{ (!NEWLINE ~ ANY)* }
+
+acc_descr_multiline_stmt = {
+    ^"accDescr" ~ "{" ~ acc_descr_multiline_text ~ "}"
+}
+
+acc_descr_multiline_text = @{ (!"}" ~ ANY)* }
+
+// ==================
+// Packet blocks
+// ==================
+
+block_stmt = {
+    (bit_range | bit_count) ~ ":" ~ block_label
+}
+
+// Range: start-end or single bit
+bit_range = {
+    start_bit ~ ("-" ~ end_bit)?
+}
+
+start_bit = @{ ASCII_DIGIT+ }
+end_bit = @{ ASCII_DIGIT+ }
+
+// Bit count: +N
+bit_count = {
+    "+" ~ count_value
+}
+
+count_value = @{ ASCII_DIGIT+ }
+
+// Block label
+block_label = @{
+    "\"" ~ inner_quoted ~ "\""
+}
+
+inner_quoted = @{
+    (!"\"" ~ ANY)*
+}
+
+// ==================
+// Primitives
+// ==================
+
+WHITESPACE = _{ " " | "\t" }
+NEWLINE = _{ "\r\n" | "\n" }

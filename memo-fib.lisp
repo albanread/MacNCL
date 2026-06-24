@@ -1,0 +1,6 @@
+(require 'memoize)
+(defun fib (n) (if (<= n 1) n (+ (fib (- n 1)) (fib (- n 2)))))
+(memoize fib)
+(format t "fib 35 = ~A~%" (fib 35))
+(let ((tbl (car (cdr (assoc 'fib *memoized-functions*)))))
+  (format t "cache size: ~A entries (expected ~~36)~%" (hash-table-count tbl)))

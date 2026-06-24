@@ -1,0 +1,219 @@
+// Requirement diagram grammar for mermaid diagrams
+// Based on mermaid.js requirementDiagram parser
+
+// ==================
+// Top-level structure
+// ==================
+
+diagram = { SOI ~ leading_content* ~ keyword_requirement ~ document ~ EOI }
+
+// Allow comments and newlines before the keyword
+leading_content = _{ leading_comment | NEWLINE }
+leading_comment = _{ ("%%" | "#") ~ (!NEWLINE ~ ANY)* ~ NEWLINE? }
+
+keyword_requirement = _{ ^"requirementDiagram" }
+
+document = { (NEWLINE | statement)* }
+
+// ==================
+// Statements
+// ==================
+
+statement = {
+    comment_stmt
+    | acc_title_stmt
+    | acc_descr_stmt
+    | acc_descr_multiline_stmt
+    | direction_stmt
+    | requirement_def
+    | element_def
+    | relationship_def
+    | style_stmt
+    | class_def_stmt
+    | class_stmt
+    | class_shorthand_stmt
+}
+
+// ==================
+// Comments
+// ==================
+
+comment_stmt = { ("%%" | "#") ~ (!NEWLINE ~ ANY)* }
+
+// ==================
+// Accessibility
+// ==================
+
+acc_title_stmt = {
+    ^"accTitle" ~ ":" ~ acc_value
+}
+
+acc_descr_stmt = {
+    ^"accDescr" ~ ":" ~ acc_value
+}
+
+acc_descr_multiline_stmt = {
+    ^"accDescr" ~ "{" ~ acc_multiline_value ~ "}"
+}
+
+acc_value = @{ (!NEWLINE ~ ANY)* }
+
+acc_multiline_value = @{ (!"}" ~ ANY)* }
+
+// ==================
+// Direction
+// ==================
+
+direction_stmt = {
+    ^"direction" ~ direction_value
+}
+
+direction_value = { ^"TB" | ^"BT" | ^"LR" | ^"RL" }
+
+// ==================
+// Requirement Definition
+// ==================
+
+requirement_def = {
+    requirement_type ~ requirement_name ~ class_ref? ~ "{" ~ NEWLINE* ~ requirement_body ~ "}"
+}
+
+requirement_type = {
+    ^"functionalRequirement"
+    | ^"interfaceRequirement"
+    | ^"performanceRequirement"
+    | ^"physicalRequirement"
+    | ^"designConstraint"
+    | ^"requirement"
+}
+
+requirement_name = { quoted_string | unquoted_name }
+
+requirement_body = { (requirement_attr | NEWLINE)* }
+
+requirement_attr = {
+    id_attr
+    | text_attr
+    | risk_attr
+    | verify_method_attr
+}
+
+id_attr = { ^"id" ~ ":" ~ attr_value }
+text_attr = { ^"text" ~ ":" ~ attr_value }
+risk_attr = { ^"risk" ~ ":" ~ risk_level }
+verify_method_attr = { ^"verifymethod" ~ ":" ~ verify_type }
+
+risk_level = { ^"low" | ^"medium" | ^"high" }
+verify_type = { ^"analysis" | ^"demonstration" | ^"inspection" | ^"test" }
+
+attr_value = @{ (!NEWLINE ~ ANY)* }
+
+// ==================
+// Element Definition
+// ==================
+
+element_def = {
+    ^"element" ~ element_name ~ class_ref? ~ "{" ~ NEWLINE* ~ element_body ~ "}"
+}
+
+element_name = { quoted_string | unquoted_name }
+
+element_body = { (element_attr | NEWLINE)* }
+
+element_attr = {
+    type_attr
+    | docref_attr
+}
+
+type_attr = { ^"type" ~ ":" ~ attr_value }
+docref_attr = { ^"docref" ~ ":" ~ attr_value }
+
+// ==================
+// Relationships
+// ==================
+
+relationship_def = {
+    forward_relationship | reverse_relationship
+}
+
+// Standard: src - type -> dst
+forward_relationship = {
+    relationship_src ~ "-" ~ relationship_type ~ "->" ~ relationship_dst
+}
+
+// Reverse: dst <- type - src
+reverse_relationship = {
+    relationship_dst ~ "<-" ~ relationship_type ~ "-" ~ relationship_src
+}
+
+relationship_src = { quoted_string | unquoted_id }
+relationship_dst = { quoted_string | unquoted_id }
+
+relationship_type = {
+    ^"contains"
+    | ^"copies"
+    | ^"derives"
+    | ^"satisfies"
+    | ^"verifies"
+    | ^"refines"
+    | ^"traces"
+}
+
+// ==================
+// Styling
+// ==================
+
+style_stmt = {
+    ^"style" ~ id_list ~ style_list
+}
+
+class_def_stmt = {
+    ^"classDef" ~ id_list ~ style_list
+}
+
+class_stmt = {
+    ^"class" ~ id_list ~ id_list
+}
+
+class_shorthand_stmt = {
+    identifier ~ ":::" ~ id_list
+}
+
+class_ref = {
+    ":::" ~ id_list
+}
+
+id_list = {
+    identifier ~ ("," ~ identifier)*
+}
+
+style_list = @{
+    (!NEWLINE ~ ANY)+
+}
+
+// ==================
+// Primitives
+// ==================
+
+identifier = @{
+    (ASCII_ALPHANUMERIC | "_" | "-")+
+}
+
+unquoted_name = @{
+    (!("::" | "{" | NEWLINE) ~ !WHITESPACE ~ ANY)+
+}
+
+unquoted_id = @{
+    (!("-" | NEWLINE) ~ !WHITESPACE ~ ANY)+
+}
+
+quoted_string = @{
+    "\"" ~ inner_quoted ~ "\""
+}
+
+inner_quoted = @{
+    (!"\"" ~ ANY)*
+}
+
+WHITESPACE = _{ " " | "\t" }
+NEWLINE = _{ "\r\n" | "\n" }

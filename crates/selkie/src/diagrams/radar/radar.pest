@@ -1,0 +1,174 @@
+// Radar diagram grammar for mermaid diagrams
+// Based on mermaid.js langium grammar
+
+// ==================
+// Top-level structure
+// ==================
+
+diagram = { SOI ~ leading_content* ~ keyword_radar ~ document ~ EOI }
+
+// Allow comments and newlines before the keyword
+leading_content = _{ leading_comment | NEWLINE }
+leading_comment = _{ "%%" ~ (!NEWLINE ~ ANY)* ~ NEWLINE? }
+
+keyword_radar = _{ ^"radar-beta" ~ ":"? }
+
+document = { (NEWLINE | statement)* }
+
+// ==================
+// Statements
+// ==================
+
+statement = {
+    comment_stmt
+    | title_stmt
+    | acc_title_stmt
+    | acc_descr_stmt
+    | acc_descr_multiline_stmt
+    | axis_stmt
+    | curve_stmt
+    | option_stmt
+}
+
+// ==================
+// Comments
+// ==================
+
+comment_stmt = { "%%" ~ (!NEWLINE ~ ANY)* }
+
+// ==================
+// Title and Accessibility
+// ==================
+
+title_stmt = {
+    ^"title" ~ title_text
+}
+
+title_text = @{ (!NEWLINE ~ ANY)* }
+
+acc_title_stmt = {
+    ^"accTitle" ~ ":" ~ acc_title_text
+}
+
+acc_title_text = @{ (!NEWLINE ~ ANY)* }
+
+acc_descr_stmt = {
+    ^"accDescr" ~ ":" ~ acc_descr_text
+}
+
+acc_descr_text = @{ (!NEWLINE ~ ANY)* }
+
+acc_descr_multiline_stmt = {
+    ^"accDescr" ~ "{" ~ acc_descr_multiline_text ~ "}"
+}
+
+acc_descr_multiline_text = @{ (!"}" ~ ANY)* }
+
+// ==================
+// Axis definition
+// ==================
+
+axis_stmt = {
+    ^"axis" ~ axis ~ ("," ~ axis)*
+}
+
+axis = {
+    axis_name ~ axis_label?
+}
+
+axis_name = @{ (ASCII_ALPHANUMERIC | "_")+ }
+
+axis_label = {
+    "[" ~ axis_label_text ~ "]"
+}
+
+axis_label_text = @{ "\"" ~ inner_quoted ~ "\"" | (!"]" ~ ANY)+ }
+
+inner_quoted = @{ (!"\"" ~ ANY)* }
+
+// ==================
+// Curve definition
+// ==================
+
+curve_stmt = {
+    ^"curve" ~ curve ~ ("," ~ curve)*
+}
+
+curve = {
+    curve_name ~ curve_label? ~ "{" ~ entries ~ "}"
+}
+
+curve_name = @{ (ASCII_ALPHANUMERIC | "_")+ }
+
+curve_label = {
+    "[" ~ curve_label_text ~ "]"
+}
+
+curve_label_text = @{ "\"" ~ inner_curve_quoted ~ "\"" | (!"]" ~ ANY)+ }
+
+inner_curve_quoted = @{ (!"\"" ~ ANY)* }
+
+// Entries can be simple numbers or detailed (axis: value) pairs
+// Allow newlines within the entries block (leading and trailing)
+entries = {
+    entry_newline* ~ (detailed_entry ~ (entry_sep ~ detailed_entry)*) ~ entry_newline*
+    | entry_newline* ~ (number_entry ~ (entry_sep ~ number_entry)*) ~ entry_newline*
+}
+
+entry_sep = _{ "," ~ entry_newline* }
+entry_newline = _{ "\r\n" | "\n" }
+
+detailed_entry = {
+    entry_axis ~ ":"? ~ entry_value
+}
+
+entry_axis = @{ (ASCII_ALPHANUMERIC | "_")+ }
+
+number_entry = {
+    entry_value
+}
+
+entry_value = @{ "-"? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
+
+// ==================
+// Options
+// ==================
+
+option_stmt = {
+    option ~ ("," ~ option)*
+}
+
+option = {
+    show_legend_opt | ticks_opt | max_opt | min_opt | graticule_opt
+}
+
+show_legend_opt = {
+    ^"showLegend" ~ boolean_value
+}
+
+ticks_opt = {
+    ^"ticks" ~ number_value
+}
+
+max_opt = {
+    ^"max" ~ number_value
+}
+
+min_opt = {
+    ^"min" ~ number_value
+}
+
+graticule_opt = {
+    ^"graticule" ~ graticule_value
+}
+
+boolean_value = @{ ^"true" | ^"false" }
+number_value = @{ "-"? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
+graticule_value = @{ ^"circle" | ^"polygon" }
+
+// ==================
+// Primitives
+// ==================
+
+WHITESPACE = _{ " " | "\t" }
+NEWLINE = _{ "\r\n" | "\n" }

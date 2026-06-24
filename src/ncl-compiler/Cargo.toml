@@ -1,0 +1,23 @@
+[package]
+name = "ncl-compiler"
+version = "0.0.0"
+edition = "2024"
+
+[features]
+default = ["gc-page-heap"]
+gc-page-heap = [
+    "ncl-runtime/gc-page-heap",
+    "ncl-reader/gc-page-heap",
+    "ncl-llvm/gc-page-heap",
+]
+
+[dependencies]
+ncl-ir = { path = "../ncl-ir" }
+ncl-reader = { path = "../ncl-reader", default-features = false }
+ncl-runtime = { path = "../ncl-runtime", default-features = false }
+ncl-llvm = { path = "../ncl-llvm", default-features = false }
+# MacNCL: vendored stub (see crates/new-asm).
+new-asm = { path = "../../crates/new-asm" }
+
+[lints]
+workspace = true

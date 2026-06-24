@@ -1,0 +1,170 @@
+// Quadrant chart diagram grammar for mermaid diagrams
+// Based on mermaid.js quadrantChart parser
+
+// ==================
+// Top-level structure
+// ==================
+
+diagram = { SOI ~ leading_content* ~ keyword_quadrant ~ document ~ EOI }
+
+// Allow comments and newlines before the keyword
+leading_content = _{ leading_comment | NEWLINE }
+leading_comment = _{ "%%" ~ (!NEWLINE ~ ANY)* ~ NEWLINE? }
+
+keyword_quadrant = _{ ^"quadrantChart" }
+
+document = { (NEWLINE | statement)* }
+
+// ==================
+// Statements
+// ==================
+
+statement = {
+    comment_stmt
+    | title_stmt
+    | x_axis_stmt
+    | y_axis_stmt
+    | quadrant1_stmt
+    | quadrant2_stmt
+    | quadrant3_stmt
+    | quadrant4_stmt
+    | class_def_stmt
+    | point_stmt
+}
+
+// ==================
+// Comments
+// ==================
+
+comment_stmt = { "%%" ~ (!NEWLINE ~ ANY)* }
+
+// ==================
+// Title
+// ==================
+
+title_stmt = {
+    ^"title" ~ line_content
+}
+
+// ==================
+// Axis labels
+// ==================
+
+x_axis_stmt = {
+    ^"x-axis" ~ axis_text ~ (arrow ~ axis_text)?
+}
+
+y_axis_stmt = {
+    ^"y-axis" ~ axis_text ~ (arrow ~ axis_text)?
+}
+
+axis_text = {
+    quoted_string | unquoted_axis_text
+}
+
+unquoted_axis_text = @{
+    (!"-->" ~ !NEWLINE ~ ANY)+
+}
+
+arrow = { "-->" }
+
+// ==================
+// Quadrant labels
+// ==================
+
+quadrant1_stmt = {
+    ^"quadrant-1" ~ label_text
+}
+
+quadrant2_stmt = {
+    ^"quadrant-2" ~ label_text
+}
+
+quadrant3_stmt = {
+    ^"quadrant-3" ~ label_text
+}
+
+quadrant4_stmt = {
+    ^"quadrant-4" ~ label_text
+}
+
+label_text = {
+    quoted_string | unquoted_label_text
+}
+
+unquoted_label_text = @{
+    (!NEWLINE ~ ANY)+
+}
+
+// ==================
+// Class definitions
+// ==================
+
+class_def_stmt = {
+    ^"classDef" ~ class_name ~ style_list
+}
+
+class_name = @{
+    (ASCII_ALPHANUMERIC | "_" | "-")+
+}
+
+style_list = @{
+    (!NEWLINE ~ ANY)+
+}
+
+// ==================
+// Points
+// ==================
+
+point_stmt = {
+    point_name ~ class_ref? ~ ":" ~ coordinates ~ point_styles?
+}
+
+point_name = {
+    quoted_string | unquoted_point_name
+}
+
+unquoted_point_name = @{
+    (!(":" | ":::") ~ !NEWLINE ~ ANY)+
+}
+
+class_ref = {
+    ":::" ~ class_name
+}
+
+coordinates = {
+    "[" ~ number ~ "," ~ number ~ "]"
+}
+
+number = @{
+    ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)?
+}
+
+point_styles = {
+    style_param ~ ("," ~ style_param)*
+}
+
+style_param = @{
+    (ASCII_ALPHA | "-")+ ~ ":" ~ style_value
+}
+
+style_value = @{
+    (!("," | NEWLINE) ~ ANY)+
+}
+
+// ==================
+// Primitives
+// ==================
+
+quoted_string = @{
+    "\"" ~ inner_quoted ~ "\""
+}
+
+inner_quoted = @{
+    (!"\"" ~ ANY)*
+}
+
+line_content = @{ (!NEWLINE ~ ANY)* }
+
+WHITESPACE = _{ " " | "\t" }
+NEWLINE = _{ "\r\n" | "\n" }

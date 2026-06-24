@@ -1,0 +1,185 @@
+// Git graph diagram grammar for mermaid diagrams
+// Based on mermaid.js gitGraph parser
+
+// ==================
+// Top-level structure
+// ==================
+
+diagram = { SOI ~ leading_content* ~ keyword_gitgraph ~ direction? ~ ":"? ~ document ~ EOI }
+
+// Allow comments and newlines before the keyword
+leading_content = _{ leading_comment | NEWLINE }
+leading_comment = _{ "%%" ~ (!NEWLINE ~ ANY)* ~ NEWLINE? }
+
+keyword_gitgraph = _{ ^"gitGraph" }
+
+direction = { "TB" | "TD" | "BT" | "LR" }
+
+document = { (NEWLINE | statement)* }
+
+// ==================
+// Statements
+// ==================
+
+statement = {
+    comment_stmt
+    | acc_title_stmt
+    | acc_descr_stmt
+    | commit_stmt
+    | branch_stmt
+    | checkout_stmt
+    | merge_stmt
+    | cherry_pick_stmt
+}
+
+// ==================
+// Comments
+// ==================
+
+comment_stmt = { "%%" ~ (!NEWLINE ~ ANY)* }
+
+// ==================
+// Accessibility
+// ==================
+
+acc_title_stmt = {
+    ^"accTitle" ~ ":" ~ line_content
+}
+
+acc_descr_stmt = {
+    acc_descr_single | acc_descr_multi
+}
+
+acc_descr_single = {
+    ^"accDescr" ~ ":" ~ line_content
+}
+
+acc_descr_multi = {
+    ^"accDescr" ~ "{" ~ multiline_content ~ "}"
+}
+
+line_content = @{ (!NEWLINE ~ ANY)* }
+multiline_content = @{ (!"}" ~ ANY)* }
+
+// ==================
+// Commit
+// ==================
+
+commit_stmt = {
+    ^"commit" ~ commit_options*
+}
+
+commit_options = {
+    commit_id | commit_tag | commit_type | commit_msg
+}
+
+commit_id = {
+    ^"id" ~ ":" ~ quoted_string
+}
+
+commit_tag = {
+    ^"tag" ~ ":" ~ quoted_string
+}
+
+commit_type = {
+    ^"type" ~ ":" ~ type_value
+}
+
+type_value = { ^"NORMAL" | ^"REVERSE" | ^"HIGHLIGHT" }
+
+commit_msg = {
+    (^"msg" ~ ":")? ~ quoted_string
+}
+
+// ==================
+// Branch
+// ==================
+
+branch_stmt = {
+    ^"branch" ~ branch_name ~ branch_options*
+}
+
+branch_name = @{
+    (ASCII_ALPHANUMERIC | "_" | "-" | "/" | ".")+
+}
+
+branch_options = {
+    branch_order
+}
+
+branch_order = {
+    ^"order" ~ ":" ~ integer
+}
+
+integer = @{ ASCII_DIGIT+ }
+
+// ==================
+// Checkout / Switch
+// ==================
+
+checkout_stmt = {
+    (^"checkout" | ^"switch") ~ branch_name
+}
+
+// ==================
+// Merge
+// ==================
+
+merge_stmt = {
+    ^"merge" ~ branch_name ~ merge_options*
+}
+
+merge_options = {
+    merge_id | merge_tag | merge_type
+}
+
+merge_id = {
+    ^"id" ~ ":" ~ quoted_string
+}
+
+merge_tag = {
+    ^"tag" ~ ":" ~ quoted_string
+}
+
+merge_type = {
+    ^"type" ~ ":" ~ type_value
+}
+
+// ==================
+// Cherry-pick
+// ==================
+
+cherry_pick_stmt = {
+    ^"cherry-pick" ~ cherry_pick_options+
+}
+
+cherry_pick_options = {
+    cherry_pick_id | cherry_pick_parent | cherry_pick_tag
+}
+
+cherry_pick_id = {
+    ^"id" ~ ":" ~ quoted_string
+}
+
+cherry_pick_parent = {
+    ^"parent" ~ ":" ~ quoted_string
+}
+
+cherry_pick_tag = {
+    ^"tag" ~ ":" ~ quoted_string
+}
+
+// ==================
+// Quoted strings
+// ==================
+
+quoted_string = @{
+    "\"" ~ (!"\"" ~ ANY)* ~ "\""
+}
+
+// ==================
+// Primitives
+// ==================
+
+WHITESPACE = _{ " " | "\t" }
+NEWLINE = _{ "\r\n" | "\n" }

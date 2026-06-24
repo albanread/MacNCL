@@ -1,0 +1,156 @@
+// XY Chart diagram grammar for mermaid diagrams
+// Based on mermaid.js xychart parser
+
+// ==================
+// Top-level structure
+// ==================
+
+diagram = { SOI ~ leading_content* ~ keyword_xychart ~ orientation? ~ document ~ EOI }
+
+// Allow comments and newlines before the keyword
+leading_content = _{ leading_comment | NEWLINE }
+leading_comment = _{ "%%" ~ (!NEWLINE ~ ANY)* ~ NEWLINE? }
+
+keyword_xychart = _{ ^"xychart-beta" | ^"xychart" }
+
+orientation = { ^"horizontal" | ^"vertical" }
+
+document = { (NEWLINE | statement)* }
+
+// ==================
+// Statements
+// ==================
+
+statement = {
+    comment_stmt
+    | title_stmt
+    | x_axis_stmt
+    | y_axis_stmt
+    | line_stmt
+    | bar_stmt
+}
+
+// ==================
+// Comments
+// ==================
+
+comment_stmt = { "%%" ~ (!NEWLINE ~ ANY)* }
+
+// ==================
+// Title
+// ==================
+
+title_stmt = {
+    ^"title" ~ title_text
+}
+
+title_text = {
+    quoted_string | unquoted_title
+}
+
+unquoted_title = @{
+    (!NEWLINE ~ ANY)+
+}
+
+// ==================
+// X-axis
+// ==================
+
+x_axis_stmt = {
+    ^"x-axis" ~ axis_title? ~ (range_data | band_data)?
+}
+
+axis_title = {
+    quoted_string | unquoted_axis_title
+}
+
+// Unquoted axis title: stops before '[', '-->', digits (for range), or newline
+unquoted_axis_title = @{
+    (!("[" | "-->" | NEWLINE | ASCII_DIGIT) ~ ANY)+
+}
+
+range_data = {
+    number ~ "-->" ~ number
+}
+
+band_data = {
+    "[" ~ category_list ~ "]"
+}
+
+category_list = {
+    category ~ ("," ~ category)*
+}
+
+category = {
+    quoted_string | unquoted_category
+}
+
+unquoted_category = @{
+    (!("]" | "," | NEWLINE) ~ !WHITESPACE ~ ANY)+
+}
+
+// ==================
+// Y-axis
+// ==================
+
+y_axis_stmt = {
+    ^"y-axis" ~ axis_title? ~ range_data?
+}
+
+// ==================
+// Line plot
+// ==================
+
+line_stmt = {
+    ^"line" ~ plot_title? ~ data_array
+}
+
+plot_title = {
+    quoted_string | unquoted_plot_title
+}
+
+// Unquoted plot title: must start with a letter and stops before '['
+unquoted_plot_title = @{
+    ASCII_ALPHA ~ (!("[" | NEWLINE) ~ ANY)*
+}
+
+data_array = {
+    "[" ~ number_list ~ "]"
+}
+
+number_list = {
+    signed_number ~ ("," ~ signed_number)*
+}
+
+signed_number = @{
+    ("+" | "-")? ~ number
+}
+
+// ==================
+// Bar plot
+// ==================
+
+bar_stmt = {
+    ^"bar" ~ plot_title? ~ data_array
+}
+
+// ==================
+// Primitives
+// ==================
+
+// Number: integer or decimal (supports leading decimal like .6)
+number = @{
+    ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT*)?
+    | "." ~ ASCII_DIGIT+
+}
+
+quoted_string = @{
+    "\"" ~ inner_quoted ~ "\""
+}
+
+inner_quoted = @{
+    (!"\"" ~ ANY)*
+}
+
+WHITESPACE = _{ " " | "\t" }
+NEWLINE = _{ "\r\n" | "\n" }

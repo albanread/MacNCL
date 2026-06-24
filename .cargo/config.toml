@@ -1,0 +1,28 @@
+# Workstation-local LLVM install prefix. inkwell / llvm-sys read this
+# at build time to find headers and libs. The env-var name encodes the
+# major LLVM version, e.g. LLVM_SYS_221_PREFIX for the 22.1.x series.
+#
+# Update the path if your LLVM install lives elsewhere. We use the
+# same install as our sibling project NewCP.
+[env]
+# MacNCL: Homebrew keg-only LLVM 22.1.x on Apple Silicon.
+LLVM_SYS_221_PREFIX = "/opt/homebrew/opt/llvm"
+# Test threads need large stacks: each test loads the full stdlib
+# (macroexpansion + LLVM codegen recurse deeply in debug mode).
+# 8 MiB matches the ncl-driver worker thread.
+RUST_MIN_STACK = "8388608"
+# MacNCL / Apple Silicon: the libtest harness runs tests concurrently,
+# and each spins up the runtime and JIT-compiles the stdlib. On
+# aarch64-apple-darwin the JIT W^X toggle (pthread_jit_write_protect_np)
+# is *per-thread*, so concurrent JIT across threads aborts (SIGABRT).
+# Force one test thread. The shipping `ncl` binary is unaffected: it
+# runs Lisp on a single worker thread. See docs/PORTING_DESIGN.md §8.
+RUST_TEST_THREADS = "1"
+
+# Windows debug builds need a fatter main-thread stack. The default
+# 1 MiB is fine for release (optimized frames are tight), but debug
+# frames blow it during stdlib bootstrap — every defmacro and defclass
+# in conditions.lisp / clos.lisp recurses through unoptimized macro
+# expansion. 16 MiB matches what Corman ships and is plenty.
+[target.'cfg(target_os = "windows")']
+rustflags = ["-C", "link-arg=/STACK:16777216"]

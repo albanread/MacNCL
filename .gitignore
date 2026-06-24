@@ -1,4 +1,30 @@
-/target
-**/*.rs.bk
-.DS_Store
-Cargo.lock.bak
+/target/
+
+# Release package — built artefacts, never source.
+/release/
+
+# Scratch / temp directories.
+/tmp/
+
+# SBCL (downloaded reference implementation, used only for A/B benchmarking).
+/sbcl/
+
+# Local debug / phase-dump artifacts produced by the driver and tests.
+# Useful while iterating, never committed.
+*.log
+*.ll
+/out.log
+/out.txt
+
+# Captured stdout/stderr from test runs.
+ncl-stdout*.txt
+ncl-stderr*.txt
+
+# Loader artifact cache (non-canonical, see MANIFESTO.md). Source is
+# canonical; the cache can be deleted at any time without loss.
+/.ncl-cache/
+
+# Compiled binaries are never source. doc-crate.exe is a build artifact
+# of crates/doc-crate (cargo build --release -p doc-crate); Test-Render.ps1
+# expects a copy beside it. Keep it out of git like everything in /release/.
+/tools/_verify/doc-crate.exe

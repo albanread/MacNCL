@@ -1,0 +1,87 @@
+// Timeline diagram grammar for mermaid diagrams
+// Based on mermaid.js timeline parser
+
+// ==================
+// Top-level structure
+// ==================
+
+diagram = { SOI ~ leading_content* ~ keyword_timeline ~ document ~ EOI }
+
+// Allow comments and newlines before the keyword
+leading_content = _{ leading_comment | NEWLINE }
+leading_comment = _{ "%%" ~ (!NEWLINE ~ ANY)* ~ NEWLINE? }
+
+keyword_timeline = _{ ^"timeline" }
+
+document = { (NEWLINE | statement)* }
+
+// ==================
+// Statements
+// ==================
+
+statement = {
+    comment_stmt
+    | title_stmt
+    | section_stmt
+    | event_continuation
+    | task_stmt
+}
+
+// ==================
+// Comments
+// ==================
+
+comment_stmt = { "%%" ~ (!NEWLINE ~ ANY)* }
+
+// ==================
+// Title
+// ==================
+
+title_stmt = {
+    ^"title" ~ line_content
+}
+
+// ==================
+// Section
+// ==================
+
+section_stmt = {
+    ^"section" ~ section_name
+}
+
+section_name = @{
+    (!NEWLINE ~ ANY)+
+}
+
+// ==================
+// Tasks and events
+// ==================
+
+// A task is a line that doesn't start with special keywords
+// Format: task_name: event1 : event2 : event3
+task_stmt = {
+    task_name ~ (":" ~ events)?
+}
+
+task_name = @{
+    (!":" ~ !NEWLINE ~ ANY)+
+}
+
+events = @{
+    (!NEWLINE ~ ANY)*
+}
+
+// Continuation line for adding more events to previous task
+// Starts with : and contains more events
+event_continuation = {
+    ":" ~ events
+}
+
+// ==================
+// Primitives
+// ==================
+
+line_content = @{ (!NEWLINE ~ ANY)* }
+
+WHITESPACE = _{ " " | "\t" }
+NEWLINE = _{ "\r\n" | "\n" }

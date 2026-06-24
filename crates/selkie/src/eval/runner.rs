@@ -1,0 +1,518 @@
+//! Evaluation pipeline runner.
+//!
+//! This module orchestrates the evaluation process:
+//! 1. Parse diagram with selkie
+//! 2. Render diagram with selkie
+//! 3. Get reference SVG (from cache or render with mermaid.js)
+//! 4. Run structural checks
+//! 5. Calculate visual similarity (SSIM)
+//! 6. Compile results
+
+use super::cache::ReferenceCache;
+use super::checks::{calculate_similarity, check_structure, CheckConfig};
+use super::samples::{OwnedSample, Sample};
+use super::{
+    DiagramResult, Dimensions, EvalResult, Issue, Level, ParseResult, RenderResult, Status,
+};
+use crate::render::svg::SvgStructure;
+
+/// SVG pair for PNG comparison: (name, diagram_type, source_text, selkie_svg, reference_svg)
+pub type SvgPair = (String, String, String, String, String);
+
+/// Configuration for the evaluation runner
+#[derive(Debug, Clone, Default)]
+pub struct EvalConfig {
+    /// Filter by diagram type (None = all types)
+    pub diagram_type_filter: Option<String>,
+    /// Whether to skip visual comparison (SSIM)
+    pub skip_visual: bool,
+    /// Use pre-committed SVGs from docs/images/reference/ instead of rendering with mmdc.
+    /// Falls back to unverified repo cache reads (no hash check). Useful in CI where
+    /// mmdc/Playwright may not be available.
+    pub use_repo_svgs: bool,
+    /// Structural check configuration
+    pub check_config: CheckConfig,
+}
+
+/// Input diagram for evaluation
+#[derive(Debug, Clone)]
+pub struct DiagramInput {
+    /// Name/identifier
+    pub name: String,
+    /// Source file (optional)
+    pub source: Option<String>,
+    /// Diagram type (auto-detected if not provided)
+    pub diagram_type: Option<String>,
+    /// The mermaid diagram source text
+    pub text: String,
+}
+
+impl From<Sample> for DiagramInput {
+    fn from(sample: Sample) -> Self {
+        Self {
+            name: sample.name.to_string(),
+            source: None,
+            diagram_type: Some(sample.diagram_type.to_string()),
+            text: sample.source.to_string(),
+        }
+    }
+}
+
+impl From<OwnedSample> for DiagramInput {
+    fn from(sample: OwnedSample) -> Self {
+        Self {
+            name: sample.name,
+            source: None,
+            diagram_type: Some(sample.diagram_type),
+            text: sample.source,
+        }
+    }
+}
+
+/// Evaluation runner
+pub struct EvalRunner {
+    config: EvalConfig,
+    cache: ReferenceCache,
+    /// SVG pairs collected during evaluation (for PNG generation)
+    svg_pairs: std::cell::RefCell<Vec<SvgPair>>,
+}
+
+impl EvalRunner {
+    /// Create a new runner with configuration
+    pub fn new(config: EvalConfig, cache: ReferenceCache) -> Self {
+        Self {
+            config,
+            cache,
+            svg_pairs: std::cell::RefCell::new(Vec::new()),
+        }
+    }
+
+    /// Create a runner with default configuration
+    pub fn with_defaults() -> Self {
+        Self::new(EvalConfig::default(), ReferenceCache::with_defaults())
+    }
+
+    /// Get collected SVG pairs for PNG generation
+    pub fn take_svg_pairs(&self) -> Vec<SvgPair> {
+        self.svg_pairs.borrow_mut().drain(..).collect()
+    }
+
+    /// Get a reference to the cache
+    pub fn cache(&self) -> &ReferenceCache {
+        &self.cache
+    }
+
+    /// Evaluate a list of diagrams
+    pub fn evaluate(&self, inputs: &[DiagramInput]) -> EvalResult {
+        let mut result = EvalResult::new();
+
+        // Apply type filter
+        let filtered: Vec<_> = inputs
+            .iter()
+            .filter(|input| {
+                if let Some(ref filter) = self.config.diagram_type_filter {
+                    input.diagram_type.as_deref() == Some(filter.as_str())
+                } else {
+                    true
+                }
+            })
+            .collect();
+
+        // Get reference SVGs: either from repo cache (pre-committed) or by rendering with mmdc
+        let reference_svgs = if self.config.use_repo_svgs {
+            // Use pre-committed SVGs from docs/images/reference/ without hash verification.
+            // This avoids needing mmdc/Playwright (useful in CI).
+            eprintln!("Using pre-committed reference SVGs from repo cache...");
+            filtered
+                .iter()
+                .map(|i| {
+                    self.cache.get_unverified_by_name(&i.name).ok_or_else(|| {
+                        format!(
+                            "No pre-committed reference SVG found for '{}' in repo cache",
+                            i.name
+                        )
+                    })
+                })
+                .collect()
+        } else {
+            // Pre-render all reference SVGs in batch (uses cache for already-rendered diagrams)
+            // Pass both names and texts for named caching (saves to docs/images/reference/)
+            let named_diagrams: Vec<(&str, &str)> = filtered
+                .iter()
+                .map(|i| (i.name.as_str(), i.text.as_str()))
+                .collect();
+            self.cache.render_batch_named(&named_diagrams)
+        };
+
+        // Evaluate each diagram with pre-rendered reference
+        for (i, input) in filtered.iter().enumerate() {
+            eprint!(
+                "\rEvaluating {}/{}: {}...",
+                i + 1,
+                filtered.len(),
+                input.name
+            );
+            let reference_svg = reference_svgs[i].clone();
+            let diagram_result = self.evaluate_single_with_reference(input, reference_svg);
+            result.diagrams.push(diagram_result);
+        }
+        eprintln!();
+
+        // Compute summary statistics
+        result.compute_stats();
+
+        result
+    }
+
+    /// Evaluate a single diagram (fetches reference SVG internally)
+    pub fn evaluate_single(&self, input: &DiagramInput) -> DiagramResult {
+        let reference_svg = self.cache.get_or_render(&input.text);
+        self.evaluate_single_with_reference(input, reference_svg)
+    }
+
+    /// Evaluate a single diagram with a pre-rendered reference SVG
+    fn evaluate_single_with_reference(
+        &self,
+        input: &DiagramInput,
+        reference_svg: Result<String, String>,
+    ) -> DiagramResult {
+        let mut result = DiagramResult {
+            name: input.name.clone(),
+            source: input.source.clone(),
+            diagram_type: input
+                .diagram_type
+                .clone()
+                .unwrap_or_else(|| detect_diagram_type(&input.text)),
+            diagram_text: Some(input.text.clone()),
+            status: Status::Match,
+            visual_similarity: None,
+            structural_similarity: None,
+            structural_match: true,
+            issues: Vec::new(),
+            parse_result: ParseResult {
+                selkie_success: false,
+                selkie_error: None,
+                reference_success: false,
+                reference_error: None,
+            },
+            render_result: None,
+            selkie_svg: None,
+            reference_svg: None,
+        };
+
+        // Step 1: Parse with selkie
+        let selkie_parsed = crate::parse(&input.text);
+        match &selkie_parsed {
+            Ok(_) => result.parse_result.selkie_success = true,
+            Err(e) => {
+                result.parse_result.selkie_error = Some(e.to_string());
+                result
+                    .issues
+                    .push(Issue::error("parse", format!("Selkie parse failed: {}", e)));
+            }
+        }
+
+        // Step 2: Process reference SVG result
+        match &reference_svg {
+            Ok(_) => result.parse_result.reference_success = true,
+            Err(e) => {
+                result.parse_result.reference_error = Some(e.clone());
+                // Not necessarily an error - mermaid.js might legitimately reject it
+            }
+        }
+        result.reference_svg = reference_svg.as_ref().ok().cloned();
+
+        // If neither parser succeeded, we're done
+        if !result.parse_result.selkie_success && !result.parse_result.reference_success {
+            result.status = result.determine_status();
+            return result;
+        }
+
+        // Step 3: Render with selkie (if parsed)
+        let selkie_svg = if let Ok(parsed) = &selkie_parsed {
+            match crate::render(parsed) {
+                Ok(svg) => Some(svg),
+                Err(e) => {
+                    result.issues.push(Issue::error(
+                        "render",
+                        format!("Selkie render failed: {}", e),
+                    ));
+                    None
+                }
+            }
+        } else {
+            None
+        };
+        result.selkie_svg = selkie_svg.clone();
+
+        // Step 4: Extract structures and compare
+        let selkie_structure = selkie_svg
+            .as_ref()
+            .and_then(|svg| SvgStructure::from_svg(svg).ok());
+        let reference_structure = reference_svg
+            .as_ref()
+            .ok()
+            .and_then(|svg| SvgStructure::from_svg(svg).ok());
+
+        // Update render result
+        result.render_result = Some(RenderResult {
+            selkie_success: selkie_svg.is_some(),
+            selkie_error: if selkie_svg.is_none() && result.parse_result.selkie_success {
+                Some("Render failed".to_string())
+            } else {
+                None
+            },
+            reference_success: reference_structure.is_some(),
+            reference_error: if reference_structure.is_none()
+                && result.parse_result.reference_success
+            {
+                Some("Structure extraction failed".to_string())
+            } else {
+                None
+            },
+            selkie_dimensions: selkie_structure.as_ref().map(|s| Dimensions {
+                width: s.width,
+                height: s.height,
+            }),
+            reference_dimensions: reference_structure.as_ref().map(|s| Dimensions {
+                width: s.width,
+                height: s.height,
+            }),
+        });
+
+        // Step 5: Structural comparison
+        if let (Some(selkie_struct), Some(ref_struct)) = (&selkie_structure, &reference_structure) {
+            // Calculate structural similarity score
+            result.structural_similarity = Some(calculate_similarity(selkie_struct, ref_struct));
+
+            let check_issues =
+                check_structure(selkie_struct, ref_struct, &self.config.check_config);
+            result.structural_match = !check_issues.iter().any(|i| i.level == Level::Error);
+            result.issues.extend(check_issues);
+        }
+
+        // Step 6: Visual similarity (SSIM) and collect SVG pairs
+        if let (Some(selkie), Ok(reference)) = (&selkie_svg, &reference_svg) {
+            // Store SVG pair for PNG generation (name, diagram_type, source_text, selkie_svg, reference_svg)
+            self.svg_pairs.borrow_mut().push((
+                input.name.clone(),
+                result.diagram_type.clone(),
+                input.text.clone(),
+                selkie.clone(),
+                reference.clone(),
+            ));
+
+            // Calculate visual similarity if not skipped
+            if !self.config.skip_visual {
+                match super::png::compare_svgs(selkie, reference) {
+                    Ok(comparison) => {
+                        result.visual_similarity = Some(comparison.ssim);
+                    }
+                    Err(_e) => {
+                        // Visual comparison failed (e.g., png feature not enabled)
+                        // This is not a structural error, so we don't add an issue
+                    }
+                }
+            }
+        }
+
+        // Determine final status
+        result.status = result.determine_status();
+
+        result
+    }
+}
+
+/// Detect diagram type from text
+fn detect_diagram_type(text: &str) -> String {
+    let text_lower = text.to_lowercase();
+
+    // Simple substring matching for diagram type detection
+    if text_lower.contains("sequencediagram") {
+        return "sequence".to_string();
+    }
+    if text_lower.contains("classdiagram") {
+        return "class".to_string();
+    }
+    if text_lower.contains("statediagram") {
+        return "state".to_string();
+    }
+    if text_lower.contains("erdiagram") {
+        return "er".to_string();
+    }
+    if text_lower.contains("gitgraph") {
+        return "git".to_string();
+    }
+    if text_lower.contains("gantt") {
+        return "gantt".to_string();
+    }
+    if text_lower.contains("pie") {
+        return "pie".to_string();
+    }
+    if text_lower.contains("mindmap") {
+        return "mindmap".to_string();
+    }
+    if text_lower.contains("timeline") {
+        return "timeline".to_string();
+    }
+    if text_lower.contains("journey") {
+        return "journey".to_string();
+    }
+    if text_lower.contains("quadrantchart") {
+        return "quadrant".to_string();
+    }
+    if text_lower.contains("xychart") {
+        return "xychart".to_string();
+    }
+    if text_lower.contains("sankey") {
+        return "sankey".to_string();
+    }
+    if text_lower.contains("packet") {
+        return "packet".to_string();
+    }
+    if text_lower.contains("block") {
+        return "block".to_string();
+    }
+    if text_lower.contains("architecture") {
+        return "architecture".to_string();
+    }
+    if text_lower.contains("flowchart") {
+        return "flowchart".to_string();
+    }
+    // "graph" followed by whitespace indicates flowchart
+    if text_lower.starts_with("graph ")
+        || text_lower.starts_with("graph\t")
+        || text_lower.starts_with("graph\n")
+    {
+        return "flowchart".to_string();
+    }
+
+    "unknown".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_detect_diagram_type() {
+        assert_eq!(detect_diagram_type("flowchart LR\nA-->B"), "flowchart");
+        assert_eq!(detect_diagram_type("graph TD\nA-->B"), "flowchart");
+        assert_eq!(
+            detect_diagram_type("sequenceDiagram\nA->>B: Hi"),
+            "sequence"
+        );
+        assert_eq!(detect_diagram_type("pie\n\"A\": 50"), "pie");
+    }
+
+    #[test]
+    fn test_diagram_input_from_sample() {
+        let sample = Sample {
+            name: "test",
+            diagram_type: "flowchart",
+            source: "flowchart LR\n    A --> B",
+        };
+        let input: DiagramInput = sample.into();
+        assert_eq!(input.name, "test");
+        assert_eq!(input.diagram_type, Some("flowchart".to_string()));
+    }
+
+    #[test]
+    fn test_use_repo_svgs_reads_from_cache() {
+        use std::env::temp_dir;
+        use std::fs;
+
+        // Set up a fake repo cache with a pre-committed SVG
+        let repo_cache_dir = temp_dir().join("selkie_test_use_repo_svgs");
+        let _ = fs::remove_dir_all(&repo_cache_dir);
+        fs::create_dir_all(&repo_cache_dir).unwrap();
+
+        let svg_content = r#"<svg xmlns="http://www.w3.org/2000/svg" width="100" height="100"><rect width="100" height="100"/></svg>"#;
+        fs::write(repo_cache_dir.join("test_diagram.svg"), svg_content).unwrap();
+
+        let cache = super::super::cache::ReferenceCache::new(
+            temp_dir().join("selkie_test_use_repo_svgs_hash"),
+        )
+        .with_repo_cache(&repo_cache_dir);
+
+        let config = EvalConfig {
+            use_repo_svgs: true,
+            skip_visual: true,
+            ..Default::default()
+        };
+
+        let runner = EvalRunner::new(config, cache);
+
+        let inputs = vec![DiagramInput {
+            name: "test_diagram".to_string(),
+            source: None,
+            diagram_type: Some("flowchart".to_string()),
+            text: "flowchart LR\n    A --> B".to_string(),
+        }];
+
+        let result = runner.evaluate(&inputs);
+
+        // The reference SVG should have been loaded from the repo cache
+        assert_eq!(result.diagrams.len(), 1);
+        assert!(
+            result.diagrams[0].reference_svg.is_some(),
+            "Reference SVG should be loaded from repo cache"
+        );
+        assert!(
+            result.diagrams[0]
+                .reference_svg
+                .as_ref()
+                .unwrap()
+                .contains("<svg"),
+            "Reference SVG should contain valid SVG content"
+        );
+
+        // Clean up
+        let _ = fs::remove_dir_all(&repo_cache_dir);
+        let _ = fs::remove_dir_all(temp_dir().join("selkie_test_use_repo_svgs_hash"));
+    }
+
+    #[test]
+    fn test_use_repo_svgs_missing_svg_returns_error() {
+        use std::env::temp_dir;
+        use std::fs;
+
+        // Set up an empty repo cache
+        let repo_cache_dir = temp_dir().join("selkie_test_use_repo_svgs_missing");
+        let _ = fs::remove_dir_all(&repo_cache_dir);
+        fs::create_dir_all(&repo_cache_dir).unwrap();
+
+        let cache = super::super::cache::ReferenceCache::new(
+            temp_dir().join("selkie_test_use_repo_svgs_missing_hash"),
+        )
+        .with_repo_cache(&repo_cache_dir);
+
+        let config = EvalConfig {
+            use_repo_svgs: true,
+            skip_visual: true,
+            ..Default::default()
+        };
+
+        let runner = EvalRunner::new(config, cache);
+
+        let inputs = vec![DiagramInput {
+            name: "nonexistent_diagram".to_string(),
+            source: None,
+            diagram_type: Some("flowchart".to_string()),
+            text: "flowchart LR\n    A --> B".to_string(),
+        }];
+
+        let result = runner.evaluate(&inputs);
+
+        // The reference SVG should be None since it's not in the repo cache
+        assert_eq!(result.diagrams.len(), 1);
+        assert!(
+            result.diagrams[0].reference_svg.is_none(),
+            "Reference SVG should be None when not found in repo cache"
+        );
+
+        // Clean up
+        let _ = fs::remove_dir_all(&repo_cache_dir);
+        let _ = fs::remove_dir_all(temp_dir().join("selkie_test_use_repo_svgs_missing_hash"));
+    }
+}

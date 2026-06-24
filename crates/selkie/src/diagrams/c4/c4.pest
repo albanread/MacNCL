@@ -1,0 +1,297 @@
+// C4 diagram grammar for mermaid diagrams
+// Based on mermaid.js C4 parser
+
+// ==================
+// Top-level structure
+// ==================
+
+diagram = { SOI ~ leading_content* ~ c4_type ~ document ~ EOI }
+
+// Allow comments and newlines before the keyword
+leading_content = _{ leading_comment | NEWLINE }
+leading_comment = _{ "%%" ~ (!NEWLINE ~ ANY)* ~ NEWLINE? }
+
+c4_type = {
+    ^"C4Context"
+    | ^"C4Container"
+    | ^"C4Component"
+    | ^"C4Dynamic"
+    | ^"C4Deployment"
+}
+
+document = { (NEWLINE | statement)* }
+
+// ==================
+// Statements
+// ==================
+
+statement = {
+    comment_stmt
+    | acc_title_stmt
+    | acc_descr_stmt
+    | title_stmt
+    | direction_stmt
+    | person_stmt
+    | person_ext_stmt
+    | system_stmt
+    | system_db_stmt
+    | system_queue_stmt
+    | system_ext_stmt
+    | system_ext_db_stmt
+    | system_ext_queue_stmt
+    | container_stmt
+    | container_db_stmt
+    | container_queue_stmt
+    | container_ext_stmt
+    | container_ext_db_stmt
+    | container_ext_queue_stmt
+    | component_stmt
+    | component_db_stmt
+    | component_queue_stmt
+    | component_ext_stmt
+    | component_ext_db_stmt
+    | component_ext_queue_stmt
+    | boundary_block
+    | enterprise_boundary_block
+    | system_boundary_block
+    | container_boundary_block
+    | deployment_node_block
+    | deployment_node_l_block
+    | deployment_node_r_block
+    | rel_stmt
+    | birel_stmt
+    | rel_direction_stmt
+}
+
+// ==================
+// Comments
+// ==================
+
+comment_stmt = { "%%" ~ (!NEWLINE ~ ANY)* }
+
+// ==================
+// Accessibility
+// ==================
+
+acc_title_stmt = {
+    ^"accTitle" ~ ":" ~ line_content
+}
+
+acc_descr_stmt = {
+    acc_descr_single | acc_descr_multi
+}
+
+acc_descr_single = {
+    ^"accDescr" ~ ":" ~ line_content
+}
+
+acc_descr_multi = {
+    ^"accDescr" ~ "{" ~ multiline_content ~ "}"
+}
+
+line_content = @{ (!NEWLINE ~ ANY)* }
+multiline_content = @{ (!"}" ~ ANY)* }
+
+// ==================
+// Title
+// ==================
+
+title_stmt = {
+    ^"title" ~ title_text
+}
+
+title_text = @{ (!NEWLINE ~ ANY)* }
+
+// ==================
+// Direction
+// ==================
+
+direction_stmt = {
+    ^"direction" ~ direction_value
+}
+
+direction_value = { ^"TB" | ^"BT" | ^"LR" | ^"RL" }
+
+// ==================
+// Person
+// ==================
+
+person_stmt = {
+    ^"Person" ~ "(" ~ attributes ~ ")"
+}
+
+person_ext_stmt = {
+    ^"Person_Ext" ~ "(" ~ attributes ~ ")"
+}
+
+// ==================
+// System
+// ==================
+
+system_stmt = {
+    ^"System" ~ "(" ~ attributes ~ ")"
+}
+
+system_db_stmt = {
+    ^"SystemDb" ~ "(" ~ attributes ~ ")"
+}
+
+system_queue_stmt = {
+    ^"SystemQueue" ~ "(" ~ attributes ~ ")"
+}
+
+system_ext_stmt = {
+    ^"System_Ext" ~ "(" ~ attributes ~ ")"
+}
+
+system_ext_db_stmt = {
+    ^"SystemDb_Ext" ~ "(" ~ attributes ~ ")"
+}
+
+system_ext_queue_stmt = {
+    ^"SystemQueue_Ext" ~ "(" ~ attributes ~ ")"
+}
+
+// ==================
+// Container
+// ==================
+
+container_stmt = {
+    ^"Container" ~ "(" ~ attributes ~ ")"
+}
+
+container_db_stmt = {
+    ^"ContainerDb" ~ "(" ~ attributes ~ ")"
+}
+
+container_queue_stmt = {
+    ^"ContainerQueue" ~ "(" ~ attributes ~ ")"
+}
+
+container_ext_stmt = {
+    ^"Container_Ext" ~ "(" ~ attributes ~ ")"
+}
+
+container_ext_db_stmt = {
+    ^"ContainerDb_Ext" ~ "(" ~ attributes ~ ")"
+}
+
+container_ext_queue_stmt = {
+    ^"ContainerQueue_Ext" ~ "(" ~ attributes ~ ")"
+}
+
+// ==================
+// Component
+// ==================
+
+component_stmt = {
+    ^"Component" ~ "(" ~ attributes ~ ")"
+}
+
+component_db_stmt = {
+    ^"ComponentDb" ~ "(" ~ attributes ~ ")"
+}
+
+component_queue_stmt = {
+    ^"ComponentQueue" ~ "(" ~ attributes ~ ")"
+}
+
+component_ext_stmt = {
+    ^"Component_Ext" ~ "(" ~ attributes ~ ")"
+}
+
+component_ext_db_stmt = {
+    ^"ComponentDb_Ext" ~ "(" ~ attributes ~ ")"
+}
+
+component_ext_queue_stmt = {
+    ^"ComponentQueue_Ext" ~ "(" ~ attributes ~ ")"
+}
+
+// ==================
+// Boundaries
+// ==================
+
+boundary_block = {
+    ^"Boundary" ~ "(" ~ attributes ~ ")" ~ "{" ~ (NEWLINE | statement)* ~ "}"
+}
+
+enterprise_boundary_block = {
+    ^"Enterprise_Boundary" ~ "(" ~ attributes ~ ")" ~ "{" ~ (NEWLINE | statement)* ~ "}"
+}
+
+system_boundary_block = {
+    ^"System_Boundary" ~ "(" ~ attributes ~ ")" ~ "{" ~ (NEWLINE | statement)* ~ "}"
+}
+
+container_boundary_block = {
+    ^"Container_Boundary" ~ "(" ~ attributes ~ ")" ~ "{" ~ (NEWLINE | statement)* ~ "}"
+}
+
+deployment_node_block = {
+    (^"Deployment_Node" | ^"Node") ~ "(" ~ attributes ~ ")" ~ "{" ~ (NEWLINE | statement)* ~ "}"
+}
+
+deployment_node_l_block = {
+    ^"Node_L" ~ "(" ~ attributes ~ ")" ~ "{" ~ (NEWLINE | statement)* ~ "}"
+}
+
+deployment_node_r_block = {
+    ^"Node_R" ~ "(" ~ attributes ~ ")" ~ "{" ~ (NEWLINE | statement)* ~ "}"
+}
+
+// ==================
+// Relationships
+// ==================
+
+rel_stmt = {
+    ^"Rel" ~ "(" ~ attributes ~ ")"
+}
+
+birel_stmt = {
+    ^"BiRel" ~ "(" ~ attributes ~ ")"
+}
+
+rel_direction_stmt = {
+    (^"Rel_Up" | ^"Rel_U" | ^"Rel_Down" | ^"Rel_D" | ^"Rel_Left" | ^"Rel_L" | ^"Rel_Right" | ^"Rel_R" | ^"Rel_Back" | ^"Rel_B")
+    ~ "(" ~ attributes ~ ")"
+}
+
+// ==================
+// Attributes
+// ==================
+
+attributes = {
+    (attribute ~ ("," ~ attribute)*)?
+}
+
+attribute = {
+    kv_attribute | quoted_string | unquoted_attribute
+}
+
+kv_attribute = {
+    "$" ~ kv_key ~ "=" ~ quoted_string
+}
+
+kv_key = @{
+    (ASCII_ALPHA | "_")+
+}
+
+unquoted_attribute = @{
+    (!("," | ")" | NEWLINE) ~ !WHITESPACE ~ ANY)+
+}
+
+// ==================
+// Primitives
+// ==================
+
+quoted_string = @{
+    "\"" ~ inner_quoted ~ "\""
+}
+
+inner_quoted = @{
+    (!"\"" ~ ANY)*
+}
+
+WHITESPACE = _{ " " | "\t" }
+NEWLINE = _{ "\r\n" | "\n" }

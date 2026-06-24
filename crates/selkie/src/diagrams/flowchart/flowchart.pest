@@ -1,0 +1,384 @@
+// Flowchart grammar for mermaid diagrams
+// Based on mermaid.js flow.jison
+// Uses implicit whitespace handling - WHITESPACE is automatically inserted between sequence elements
+
+// ==================
+// Top-level structure
+// ==================
+
+diagram = { SOI ~ leading_content* ~ graph_config ~ document ~ EOI }
+
+// Allow comments, directives, and newlines before the keyword
+leading_content = _{ init_directive | leading_comment | NEWLINE }
+// Init directive: %%{init: {...}}%%  - note: look for }%% to handle nested braces in JSON
+init_directive = _{ "%%{" ~ (!"}%%" ~ ANY)* ~ "}%%" ~ NEWLINE? }
+leading_comment = _{ "%%" ~ (!NEWLINE ~ ANY)* ~ NEWLINE? }
+
+graph_config = {
+    keyword_graph ~ direction?
+}
+
+document = { (NEWLINE | statement)* }
+
+// ==================
+// Statements
+// ==================
+
+statement = {
+    comment_stmt
+    | acc_title_stmt
+    | acc_descr_stmt
+    | class_def_stmt
+    | class_stmt
+    | style_stmt
+    | link_style_stmt
+    | click_stmt
+    | subgraph_stmt
+    | direction_stmt
+    | vertex_statement
+}
+
+// Comments
+comment_stmt = { "%%" ~ (!NEWLINE ~ ANY)* }
+
+// ==================
+// Graph keywords
+// ==================
+
+keyword_graph = _{ "flowchart-elk" | "flowchart" | "graph" }
+keyword_subgraph = _{ "subgraph" }
+keyword_end = _{ "end" }
+
+// ==================
+// Direction
+// ==================
+
+direction = { "LR" | "RL" | "TB" | "TD" | "BT" | "BR" | "<" | ">" | "^" | "v" }
+
+direction_stmt = {
+    "direction" ~ direction
+}
+
+// ==================
+// Vertex statements
+// ==================
+
+vertex_statement = {
+    node ~ (link ~ node)*
+}
+
+node = {
+    node_group | styled_vertex
+}
+
+node_group = {
+    styled_vertex ~ ("&" ~ styled_vertex)+
+}
+
+styled_vertex = {
+    vertex ~ (":::" ~ class_name)?
+}
+
+class_name = @{
+    (ASCII_ALPHA | ASCII_DIGIT | "_" | "-")+
+}
+
+vertex = {
+    identifier ~ vertex_shape? ~ shape_metadata?
+}
+
+// @{ shape: name, key: value, ... } — extension metadata for custom shapes
+shape_metadata = { "@{" ~ metadata_inner ~ "}" }
+metadata_inner = @{ (!"}" ~ ANY)* }
+
+// ==================
+// Vertex shapes
+// ==================
+
+vertex_shape = {
+    shape_double_circle   // (((...)))
+    | shape_stadium       // ([...])
+    | shape_subroutine    // [[...]]
+    | shape_cylinder      // [(...))]
+    | shape_circle        // ((...))
+    | shape_ellipse       // (-..-)
+    | shape_hexagon       // {{...}}
+    | shape_diamond       // {...}
+    | shape_trapezoid     // [/...\]
+    | shape_inv_trapezoid // [\../]
+    | shape_lean_right    // [/../]
+    | shape_lean_left     // [\...\]
+    | shape_odd           // >...]
+    | shape_round         // (...)
+    | shape_square        // [...]
+}
+
+shape_square = { "[" ~ text ~ "]" }
+shape_round = { "(" ~ text ~ ")" }
+shape_circle = { "((" ~ text ~ "))" }
+shape_double_circle = { "(((" ~ text ~ ")))" }
+shape_stadium = { "([" ~ text ~ "])" }
+shape_subroutine = { "[[" ~ text ~ "]]" }
+shape_cylinder = { "[(" ~ text ~ ")]" }
+shape_diamond = { "{" ~ text ~ "}" }
+shape_hexagon = { "{{" ~ text ~ "}}" }
+shape_ellipse = { "(-" ~ text ~ "-)" }
+shape_odd = { ">" ~ text ~ "]" }
+// Parallelogram shapes need specialized text rules to avoid greedy matching
+// of their end delimiters
+shape_trapezoid = { "[/" ~ text_to_backslash_bracket ~ "\\]" }
+shape_inv_trapezoid = { "[\\" ~ text_to_slash_bracket ~ "/]" }
+shape_lean_right = { "[/" ~ text_to_slash_bracket ~ "/]" }
+shape_lean_left = { "[\\" ~ text_to_backslash_bracket ~ "\\]" }
+
+// ==================
+// Links/edges
+// ==================
+
+link = {
+    link_with_text | simple_link
+}
+
+// Simple link without text - must not be followed by |
+simple_link = {
+    link_id? ~ link_arrow ~ !"|"
+}
+
+link_with_text = {
+    link_id? ~ link_arrow ~ "|" ~ text ~ "|"
+    | link_id? ~ link_start ~ edge_text ~ link_end
+}
+
+link_id = { (LETTER | DIGIT | "_")+ ~ "@" }
+
+// Solid lines - atomic to prevent whitespace insertion
+// Order matters: try more specific/longer patterns first
+link_arrow = @{
+    arrow_start? ~ "-." ~ "-"? ~ arrow_end  // -.-> or -..-> dotted with arrow
+    | arrow_start? ~ "-." ~ "-"?            // -.- or -..- dotted no end arrow
+    | arrow_start? ~ "."+ ~ "-"+ ~ arrow_end?  // .-> or <.-> shorthand dotted
+    | arrow_start? ~ "="+ ~ arrow_end?      // === thick
+    | arrow_start? ~ "-"+ ~ arrow_end?      // --- or x--- or ---x or x---x
+    | "~"+ // invisible
+}
+
+// link_start should not be followed immediately by arrow_end (to distinguish from full arrows)
+link_start = @{
+    arrow_start? ~ ("--" | "==" | "-.") ~ !arrow_end
+}
+
+// link_end matches the closing part of an edge with text (e.g., -->, --->, ==>, etc.)
+link_end = @{
+    ("-"+ | "="+ | ".-") ~ arrow_end?
+}
+
+arrow_start = { "x" | "o" | "<" }
+arrow_end = { "x" | "o" | ">" }
+
+// Edge text cannot span newlines (prevents cross-line matching with multiple --- edges)
+edge_text = { (!(link_end | "\r\n" | "\n" | ";") ~ ANY)+ }
+
+// ==================
+// Text content
+// ==================
+
+text = {
+    md_string | quoted_string | plain_text
+}
+
+// Quoted strings support escape sequences including line continuations (backslash-newline)
+quoted_string = @{ "\"" ~ inner_string ~ "\"" }
+inner_string = @{ ("\\" ~ ANY | !("\"") ~ ANY)* }
+
+md_string = @{ "\"`" ~ md_content ~ "`\"" }
+md_content = @{ (!"`\"" ~ ANY)* }
+
+plain_text = @{
+    (!("]" | ")" | "}" | "|" | NEWLINE) ~ ANY)+
+}
+
+// Specialized text for shapes ending with /]
+text_to_slash_bracket = {
+    md_string | quoted_string | plain_text_to_slash_bracket
+}
+
+plain_text_to_slash_bracket = @{
+    (!("/]" | "]" | ")" | "}" | "|" | NEWLINE) ~ ANY)+
+}
+
+// Specialized text for shapes ending with \]
+text_to_backslash_bracket = {
+    md_string | quoted_string | plain_text_to_backslash_bracket
+}
+
+plain_text_to_backslash_bracket = @{
+    (!(("\\]") | "]" | ")" | "}" | "|" | NEWLINE) ~ ANY)+
+}
+
+// ==================
+// Accessibility
+// ==================
+
+acc_title_stmt = {
+    "accTitle" ~ ":" ~ line_content
+}
+
+acc_descr_stmt = {
+    acc_descr_single | acc_descr_multi
+}
+
+acc_descr_single = {
+    "accDescr" ~ ":" ~ line_content
+}
+
+acc_descr_multi = {
+    "accDescr" ~ "{" ~ multiline_content ~ "}"
+}
+
+line_content = @{ (!NEWLINE ~ ANY)* }
+multiline_content = @{ (!"}" ~ ANY)* }
+
+// ==================
+// Style definitions
+// ==================
+
+class_def_stmt = {
+    ^"classDef" ~ class_id ~ styles
+}
+
+class_id = @{
+    (ASCII_ALPHA | ASCII_DIGIT | "_" | "-")+
+}
+
+class_stmt = {
+    "class" ~ identifier_list ~ class_name
+}
+
+style_stmt = {
+    "style" ~ identifier ~ styles
+}
+
+link_style_stmt = {
+    "linkStyle" ~ (num_list | "default") ~ ("interpolate" ~ identifier)? ~ styles
+}
+
+styles = @{
+    (!(NEWLINE | ";") ~ ANY)+
+}
+
+num_list = {
+    NUMBER ~ ("," ~ NUMBER)*
+}
+
+// ==================
+// Click/interaction
+// ==================
+
+click_stmt = {
+    "click" ~ identifier ~ click_action
+}
+
+click_action = {
+    callback_action | href_action | simple_callback
+}
+
+callback_action = {
+    "call" ~ identifier ~ "(" ~ callback_args? ~ ")" ~ tooltip?
+}
+
+href_action = {
+    "href" ~ quoted_string ~ link_target? ~ tooltip?
+}
+
+simple_callback = {
+    identifier ~ tooltip?
+    | quoted_string ~ link_target? ~ tooltip?
+}
+
+callback_args = @{
+    (!")" ~ ANY)*
+}
+
+link_target = {
+    "_self" | "_blank" | "_parent" | "_top"
+}
+
+tooltip = {
+    quoted_string
+}
+
+// ==================
+// Subgraphs
+// ==================
+
+subgraph_stmt = {
+    keyword_subgraph ~ subgraph_id ~ (NEWLINE | ";") ~ document ~ keyword_end
+}
+
+// Subgraph can have: id, id[label], "quoted title", or just "quoted"
+subgraph_id = {
+    identifier ~ ("[" ~ text ~ "]")?
+    | quoted_string
+}
+
+// ==================
+// Identifiers
+// ==================
+
+// Reserved keywords that should not match as identifiers
+// Reserved keywords must be followed by a non-identifier character to match
+reserved_keyword = {
+    ("end" | "subgraph" | "classDef" | "class" | "style" | "linkStyle" | "click" | "direction" | "accTitle" | "accDescr")
+    ~ !id_char
+}
+
+// identifier cannot contain ::: (class separator)
+// First char, then more chars but stop before ::: and arrow patterns
+identifier = @{
+    !reserved_keyword ~ id_start ~ (!":::" ~ id_char)*
+}
+
+id_start = _{
+    LETTER | DIGIT | "_" | "#" | "*" | "!" | "?" | UNICODE_LETTER
+}
+
+// Hyphen is allowed but not when followed by arrow continuations (-, >, .)
+id_char = _{
+    LETTER | DIGIT | "_" | "." | ":" | "#" | "*" | "!" | "?" | UNICODE_LETTER
+    | id_hyphen
+}
+
+// A hyphen that is NOT followed by arrow characters (-, >, .)
+id_hyphen = _{ "-" ~ !("-" | ">" | ".") }
+
+identifier_list = {
+    identifier ~ ("," ~ identifier)*
+}
+
+// ==================
+// Primitives
+// ==================
+
+// WHITESPACE is automatically inserted between sequence elements in non-atomic rules
+WHITESPACE = _{ " " | "\t" }
+NEWLINE = _{ "\r\n" | "\n" | ";" }
+NUMBER = @{ ASCII_DIGIT+ }
+LETTER = _{ ASCII_ALPHA }
+DIGIT = _{ ASCII_DIGIT }
+UNICODE_LETTER = _{
+    '\u{00AA}'..'\u{00FF}'
+    | '\u{0100}'..'\u{017F}'
+    | '\u{0180}'..'\u{024F}'
+    | '\u{0250}'..'\u{02AF}'
+    | '\u{1E00}'..'\u{1EFF}'
+    | '\u{2C60}'..'\u{2C7F}'
+    | '\u{A720}'..'\u{A7FF}'
+    | '\u{3040}'..'\u{309F}' // Hiragana
+    | '\u{30A0}'..'\u{30FF}' // Katakana
+    | '\u{4E00}'..'\u{9FFF}' // CJK Unified Ideographs
+    | '\u{AC00}'..'\u{D7AF}' // Korean Hangul
+    | '\u{0400}'..'\u{04FF}' // Cyrillic
+    | '\u{0370}'..'\u{03FF}' // Greek
+    | '\u{0590}'..'\u{05FF}' // Hebrew
+    | '\u{0600}'..'\u{06FF}' // Arabic
+}

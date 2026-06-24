@@ -1,0 +1,126 @@
+// Treemap diagram grammar for mermaid diagrams
+// Based on mermaid.js langium grammar
+
+// ==================
+// Top-level structure
+// ==================
+
+diagram = { SOI ~ leading_content* ~ keyword_treemap ~ document ~ EOI }
+
+// Allow comments and newlines before the keyword
+leading_content = _{ leading_comment | ws_line | NEWLINE }
+leading_comment = _{ ws* ~ "%%" ~ (!NEWLINE ~ ANY)* ~ NEWLINE? }
+ws_line = _{ ws+ ~ &NEWLINE }
+
+keyword_treemap = _{ ^"treemap-beta" | ^"treemap" }
+
+document = { (NEWLINE | empty_line | statement)* }
+
+// Empty lines with only whitespace
+empty_line = _{ ws+ ~ &(NEWLINE | EOI) }
+
+// ==================
+// Statements
+// ==================
+
+statement = {
+    comment_stmt
+    | title_stmt
+    | acc_title_stmt
+    | acc_descr_stmt
+    | acc_descr_multiline_stmt
+    | class_def_stmt
+    | row_stmt
+}
+
+// ==================
+// Comments
+// ==================
+
+comment_stmt = { ws* ~ "%%" ~ (!NEWLINE ~ ANY)* }
+
+// ==================
+// Title and Accessibility
+// ==================
+
+title_stmt = {
+    ws* ~ ^"title" ~ title_text
+}
+
+title_text = @{ (!NEWLINE ~ ANY)* }
+
+acc_title_stmt = {
+    ws* ~ ^"accTitle" ~ ":" ~ acc_title_text
+}
+
+acc_title_text = @{ (!NEWLINE ~ ANY)* }
+
+acc_descr_stmt = {
+    ws* ~ ^"accDescr" ~ ":" ~ acc_descr_text
+}
+
+acc_descr_text = @{ (!NEWLINE ~ ANY)* }
+
+acc_descr_multiline_stmt = {
+    ws* ~ ^"accDescr" ~ "{" ~ acc_descr_multiline_text ~ "}"
+}
+
+acc_descr_multiline_text = @{ (!"}" ~ ANY)* }
+
+// ==================
+// Class definition
+// ==================
+
+class_def_stmt = {
+    ws* ~ ^"classDef" ~ ws+ ~ class_name ~ ws+ ~ class_styles ~ ";"?
+}
+
+class_name = @{ (ASCII_ALPHANUMERIC | "_")+ }
+
+class_styles = @{ (!(";" | NEWLINE) ~ ANY)* }
+
+// ==================
+// Treemap rows (items)
+// ==================
+
+row_stmt = {
+    indent ~ item
+}
+
+indent = @{ " "* }
+
+item = {
+    leaf_item | section_item
+}
+
+// Leaf item has a value (and cannot have children)
+leaf_item = {
+    item_name ~ ws* ~ (":" | ",") ~ ws* ~ item_value ~ class_selector?
+}
+
+// Section item has no value (can have children)
+section_item = {
+    item_name ~ class_selector?
+}
+
+item_name = @{
+    "\"" ~ inner_quoted ~ "\"" | "'" ~ inner_single_quoted ~ "'"
+}
+
+inner_quoted = @{ (!"\"" ~ ANY)* }
+inner_single_quoted = @{ (!"'" ~ ANY)* }
+
+item_value = @{ "-"? ~ ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT+)? }
+
+class_selector = {
+    ":::" ~ selector_name
+}
+
+selector_name = @{ (ASCII_ALPHANUMERIC | "_")+ }
+
+// ==================
+// Primitives
+// ==================
+
+ws = _{ " " | "\t" }
+NEWLINE = _{ "\r\n" | "\n" }

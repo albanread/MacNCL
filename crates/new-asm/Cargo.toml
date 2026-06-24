@@ -1,0 +1,19 @@
+# Vendored stub of `new-asm` for MacNCL (hard fork).
+#
+# The upstream crate (sibling repo on the original E:\ tree) emitted
+# Win64-ABI x86 assembly text to back the Lisp-facing `defasm` form.
+# That product is meaningless on Apple Silicon. This stub keeps the
+# *type surface* so ncl-compiler / ncl-llvm compile unchanged, while
+# the JIT call site (ncl-llvm::jit_compile_asm_proc) raises a Lisp
+# error on non-x86 builds. See docs/PORTING_DESIGN.md §3.1.
+[package]
+name = "new-asm"
+version = "0.0.0"
+edition = "2024"
+
+[lib]
+name = "new_asm"
+path = "src/lib.rs"
+
+[lints]
+workspace = true

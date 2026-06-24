@@ -1,0 +1,135 @@
+# Our fork of selkie (https://github.com/btucker/selkie), itself
+# forked again into NCL from NewFactor's `crates/selkie` (which forked
+# DocCrate's mermaid parser).  Pure text → IR; no `windows` dependency,
+# so it remains compilable on non-Windows targets and useful outside
+# the IDE's doc pane.  Joined to NCL's top-level workspace.
+
+[package]
+name = "selkie-rs"
+version = "0.3.0"
+edition = "2021"
+description = "A Rust implementation of the mermaid diagramming parser and renderer"
+license = "MIT"
+repository = "https://github.com/btucker/selkie"
+keywords = ["diagram", "chart", "flowchart", "sequence", "mermaid"]
+categories = ["visualization", "parsing"]
+
+[lib]
+name = "selkie"
+path = "src/lib.rs"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# Parsing
+pest = "2.7"
+pest_derive = "2.7"
+
+# Serialization
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Date/time handling (for gantt charts)
+chrono = { version = "0.4", features = ["serde"] }
+
+# UUID generation
+uuid = { version = "1.0", features = ["v4"] }
+
+# Regular expressions
+regex = "1.10"
+
+# Error handling
+thiserror = "1.0"
+
+# Logging
+log = "0.4"
+
+# Font metrics for accurate text measurement
+fontdue = "0.9"
+
+# File globbing (for CLI tools)
+glob = { version = "0.3", optional = true }
+
+# Cache directory discovery
+dirs = { version = "5.0", optional = true }
+
+# Temporary files (for mmdc batch mode)
+tempfile = { version = "3", optional = true }
+
+# XML parsing (for SVG analysis)
+roxmltree = "0.20"
+simplecss = { version = "0.2.2", optional = true }
+
+[dev-dependencies]
+# Testing
+pretty_assertions = "1.4"
+glob = "0.3"  # For test file discovery
+
+[[bin]]
+name = "extract-diagrams"
+path = "src/bin/extract_diagrams.rs"
+
+[[bin]]
+name = "selkie"
+path = "src/bin/selkie.rs"
+required-features = ["cli"]
+
+[features]
+default = ["cli", "png"]
+cli = ["clap", "glob", "dirs", "tempfile"]
+png = ["resvg", "image"]
+pdf = ["svg2pdf", "resvg"]
+kitty = ["resvg", "base64", "libc", "atty", "image"]
+wasm = ["js-sys", "wasm-bindgen", "uuid/js"]
+all-formats = ["png", "pdf", "kitty"]
+eval = ["cli", "png", "simplecss"]  # Everything needed for `selkie eval`
+
+[dependencies.clap]
+version = "4.4"
+features = ["derive"]
+optional = true
+
+[dependencies.resvg]
+version = "0.45"
+optional = true
+
+[dependencies.svg2pdf]
+version = "0.13"
+optional = true
+
+[dependencies.base64]
+version = "0.22"
+optional = true
+
+[dependencies.libc]
+version = "0.2"
+optional = true
+
+[dependencies.atty]
+version = "0.2"
+optional = true
+
+[dependencies.image]
+version = "0.25"
+optional = true
+default-features = false
+features = ["png"]
+
+[dependencies.wasm-bindgen]
+version = "0.2"
+optional = true
+
+[dependencies.js-sys]
+version = "0.3"
+optional = true
+
+# NB: upstream selkie set a per-crate [profile.release] for size-
+# optimised WASM. NCL drives its release profile from the workspace
+# root (opt-level=3, thin LTO), so the per-crate override is removed
+# here. Reinstate if/when a WASM build target is added.
+
+# Configure wasm-pack to enable required WASM features
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O", "--enable-bulk-memory", "--enable-nontrapping-float-to-int"]
+
+[package.metadata.wasm-pack.profile.dev]
+wasm-opt = false
