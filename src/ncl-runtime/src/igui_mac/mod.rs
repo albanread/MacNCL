@@ -18,5 +18,10 @@
 
 pub mod events;
 pub mod render;
+/// Cocoa windowing + AppKit event loop. Opt-in (`mac-gui`) because it
+/// pulls the objc2 AppKit bindings and needs a GUI session to run; the
+/// renderer and event translation below it are always built and tested.
+#[cfg(feature = "mac-gui")]
+pub mod window;
 
 pub use render::CgCanvas;
