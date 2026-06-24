@@ -754,6 +754,55 @@ impl Editor {
         self.finish_structural_edit(nc);
     }
 
+    /// Move to the start of the next word (Option-Right).
+    pub fn word_right(&mut self, extend: bool) {
+        let cs = self.chars();
+        let mut i = self.cursor;
+        while i < cs.len() && is_delim(cs[i]) {
+            i += 1;
+        }
+        while i < cs.len() && !is_delim(cs[i]) {
+            i += 1;
+        }
+        self.set_cursor_offset(i, extend);
+        self.pref_col = self.cursor_rc().1;
+    }
+
+    /// Move to the start of the previous word (Option-Left).
+    pub fn word_left(&mut self, extend: bool) {
+        let cs = self.chars();
+        let mut i = self.cursor;
+        while i > 0 && is_delim(cs[i - 1]) {
+            i -= 1;
+        }
+        while i > 0 && !is_delim(cs[i - 1]) {
+            i -= 1;
+        }
+        self.set_cursor_offset(i, extend);
+        self.pref_col = self.cursor_rc().1;
+    }
+
+    /// Delete from the cursor back to the previous word boundary
+    /// (Option-Backspace).
+    pub fn delete_word_back(&mut self) {
+        if self.delete_selection_to_undo() {
+            self.redo.clear();
+            return;
+        }
+        let cs = self.chars();
+        let mut i = self.cursor;
+        while i > 0 && is_delim(cs[i - 1]) {
+            i -= 1;
+        }
+        while i > 0 && !is_delim(cs[i - 1]) {
+            i -= 1;
+        }
+        if i < self.cursor {
+            self.edit_delete(i, self.cursor);
+            self.finish_structural_edit(i);
+        }
+    }
+
     pub fn backspace(&mut self) {
         if self.delete_selection_to_undo() {
             return;
@@ -1281,8 +1330,11 @@ impl Editor {
 
         if alt {
             match vkey {
-                vk::UP => self.move_line_up(),     // Alt-Up
-                vk::DOWN => self.move_line_down(), // Alt-Down
+                vk::UP => self.move_line_up(),         // Alt-Up
+                vk::DOWN => self.move_line_down(),     // Alt-Down
+                vk::LEFT => self.word_left(shift),     // Alt-Left
+                vk::RIGHT => self.word_right(shift),   // Alt-Right
+                vk::BACK => self.delete_word_back(),   // Alt-Backspace
                 _ => return false,
             }
             return true;
@@ -1754,6 +1806,21 @@ mod tests {
             e.on_char(c as u32);
         }
         assert_eq!(e.search.as_ref().unwrap().matches, vec![0, 4, 8]);
+    }
+
+    #[test]
+    fn word_movement_and_delete() {
+        let mut e = Editor::with_text("foo bar baz");
+        e.set_cursor(0);
+        e.word_right(false);
+        assert_eq!(e.cursor_rc(), (0, 3)); // end of "foo"
+        e.word_right(false);
+        assert_eq!(e.cursor_rc(), (0, 7)); // end of "bar"
+        e.word_left(false);
+        assert_eq!(e.cursor_rc(), (0, 4)); // start of "bar"
+        e.set_cursor(7); // after "bar"
+        e.delete_word_back();
+        assert_eq!(e.text(), "foo  baz");
     }
 
     #[test]
