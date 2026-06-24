@@ -17,17 +17,77 @@
 //! (WindowServer); it cannot run fully headless.
 
 use std::ptr::NonNull;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, OnceLock};
 
 use block2::RcBlock;
+use foreign_types::ForeignType;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent, NSEventMask,
-    NSEventType, NSWindow, NSWindowStyleMask,
+    NSEventType, NSImage, NSImageView, NSWindow, NSWindowStyleMask,
 };
-use objc2_foundation::{NSPoint, NSRect, NSSize, NSString};
+use objc2_core_graphics::CGImage;
+use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSTimer};
 
 use crate::igui_events;
 use crate::igui_mac::events as ev;
+use crate::igui_mac::render::CgCanvas;
+use crate::igui_paint::SurfaceCmd;
+
+// ── Frame presentation: worker thread sets a frame, the main-thread
+// timer renders and blits it into the window's NSImageView ──────────────
+
+static FRAME: OnceLock<Mutex<Option<Arc<Vec<SurfaceCmd>>>>> = OnceLock::new();
+static DIRTY: AtomicBool = AtomicBool::new(false);
+
+fn frame_slot() -> &'static Mutex<Option<Arc<Vec<SurfaceCmd>>>> {
+    FRAME.get_or_init(|| Mutex::new(None))
+}
+
+/// Present a frame: store the `SurfaceCmd` list and mark the window dirty.
+/// Safe to call from the Lisp worker thread — the main-thread timer reads
+/// the slot and repaints. This is the macOS analogue of `batch::submit`.
+pub fn present(cmds: Vec<SurfaceCmd>) {
+    *frame_slot()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(cmds));
+    DIRTY.store(true, Ordering::Release);
+}
+
+/// Render the current frame (if dirty) into `image_view` at `w`×`h`
+/// points. Runs on the main thread from the repaint timer.
+fn repaint(image_view: &NSImageView, w: f64, h: f64, mtm: MainThreadMarker) {
+    if !DIRTY.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    let cmds = {
+        let guard = frame_slot().lock().unwrap_or_else(|e| e.into_inner());
+        match guard.as_ref() {
+            Some(c) => Arc::clone(c),
+            None => return,
+        }
+    };
+    let mut canvas = CgCanvas::new(w as usize, h as usize);
+    canvas.execute(&cmds);
+    // Debug: dump the exact frame being presented to a PPM once, so the
+    // composed window content is inspectable without a screen grab.
+    if let Some(path) = std::env::var_os("NCL_IGUI_DUMP") {
+        static DUMPED: AtomicBool = AtomicBool::new(false);
+        if !DUMPED.swap(true, Ordering::AcqRel) {
+            let _ = std::fs::write(path, canvas.to_ppm());
+        }
+    }
+    let Some(img) = canvas.cg_image() else { return };
+    // Bridge the servo `core_graphics` CGImage to objc2's `&CGImage`:
+    // both are opaque `CGImageRef` handles to the same object.
+    let cg_ref = img.as_ptr();
+    // SAFETY: `cg_ref` is a live CGImageRef for the duration of this call;
+    // `initWithCGImage_size` retains it before we drop `img`.
+    let objc_img: &CGImage = unsafe { &*(cg_ref as *const CGImage) };
+    let ns_image = NSImage::initWithCGImage_size(mtm.alloc::<NSImage>(), objc_img, NSSize::new(w, h));
+    image_view.setImage(Some(&ns_image));
+}
 
 /// The single content child's id for this first single-window bring-up.
 /// The full child registry (one id per pane) arrives with the pane port.
@@ -67,6 +127,20 @@ where
     };
     window.setTitle(&NSString::from_str(title));
     window.center();
+
+    // Content view: an NSImageView we blit the rendered CgCanvas into.
+    let image_view = NSImageView::new(mtm);
+    window.setContentView(Some(&image_view));
+
+    // Repaint timer (~60 Hz): on the main thread, render the latest frame
+    // and show it. Cheap when not dirty (early-out).
+    let iv_for_timer = image_view.clone();
+    let repaint_block = RcBlock::new(move |_t: NonNull<NSTimer>| {
+        repaint(&iv_for_timer, width, height, mtm);
+    });
+    let _timer = unsafe {
+        NSTimer::scheduledTimerWithTimeInterval_repeats_block(1.0 / 60.0, true, &repaint_block)
+    };
 
     // Translate every key/mouse event into an IGuiEvent and push it to the
     // shared mailbox. The closure returns the event pointer unchanged so

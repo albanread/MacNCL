@@ -508,6 +508,14 @@ impl CgCanvas {
         }
     }
 
+    /// Snapshot the current bitmap as a Core Graphics image, for blitting
+    /// into an `NSImageView` / `CALayer` (see `igui_mac::window`). Returns
+    /// `None` if the backing store can't be imaged. Kept free of any
+    /// AppKit/objc2 types so `render.rs` stays always-compiled.
+    pub fn cg_image(&self) -> Option<core_graphics::image::CGImage> {
+        self.ctx.create_image()
+    }
+
     /// Read back the RGBA bytes of pixel (x, y). Panics out of bounds.
     pub fn pixel(&mut self, x: usize, y: usize) -> [u8; 4] {
         let stride = self.ctx.bytes_per_row();
