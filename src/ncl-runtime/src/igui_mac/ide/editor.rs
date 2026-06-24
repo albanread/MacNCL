@@ -40,6 +40,20 @@ enum UndoOp {
     },
 }
 
+/// Lisp syntax token classes, for highlighting.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Tok {
+    Symbol,
+    Special, // defun, lambda, let, if, …
+    Keyword, // :foo
+    Number,
+    StringLit,
+    Char,    // #\x
+    Comment, // ; …
+    Paren,
+    Quote, // ' ` , ,@ #'
+}
+
 /// Visual theme + font metrics for the editor.
 #[derive(Clone)]
 pub struct Theme {
@@ -55,6 +69,15 @@ pub struct Theme {
     pub caret: Rgba,
     pub selection: Rgba,
     pub gutter_fg: Rgba,
+    // Syntax colors.
+    pub c_special: Rgba,
+    pub c_keyword: Rgba,
+    pub c_number: Rgba,
+    pub c_string: Rgba,
+    pub c_char: Rgba,
+    pub c_comment: Rgba,
+    pub c_paren: Rgba,
+    pub c_quote: Rgba,
 }
 
 #[inline]
@@ -75,8 +98,143 @@ impl Default for Theme {
             caret: rgb(120, 200, 255),
             selection: Rgba { r: 0.40, g: 0.55, b: 0.85, a: 0.35 },
             gutter_fg: rgb(90, 96, 110),
+            c_special: rgb(198, 160, 246), // purple — special forms
+            c_keyword: rgb(244, 191, 117), // amber — :keywords
+            c_number: rgb(166, 218, 149),  // green — numbers
+            c_string: rgb(166, 218, 149),  // green — strings
+            c_char: rgb(138, 222, 200),    // teal — char literals
+            c_comment: rgb(110, 120, 135), // grey — comments
+            c_paren: rgb(140, 150, 168),   // dim — brackets
+            c_quote: rgb(238, 153, 160),   // pink — quotes
         }
     }
+}
+
+/// Special operators that get the `Special` color.
+fn is_special(word: &str) -> bool {
+    matches!(
+        word,
+        "defun" | "defmacro" | "defvar" | "defparameter" | "defconstant" | "defclass"
+            | "defmethod" | "defgeneric" | "defstruct" | "lambda" | "let" | "let*" | "flet"
+            | "labels" | "macrolet" | "if" | "when" | "unless" | "cond" | "case" | "ecase"
+            | "typecase" | "and" | "or" | "not" | "progn" | "prog1" | "prog2" | "block"
+            | "return" | "return-from" | "loop" | "do" | "do*" | "dolist" | "dotimes"
+            | "setf" | "setq" | "push" | "pop" | "incf" | "decf" | "quote" | "function"
+            | "funcall" | "apply" | "handler-case" | "unwind-protect" | "catch" | "throw"
+            | "multiple-value-bind" | "destructuring-bind" | "with-slots" | "with-accessors"
+            | "eval-when" | "declare" | "the" | "values" | "in-package" | "defpackage"
+    )
+}
+
+#[inline]
+fn is_delim(c: char) -> bool {
+    c.is_whitespace() || matches!(c, '(' | ')' | '[' | ']' | '"' | ';' | '\'' | '`' | ',')
+}
+
+/// Tokenise one line's chars into `(start_col, end_col, Tok)` spans.
+/// `in_string` tracks whether a multi-line string is open at line start;
+/// returns the updated flag for the next line.
+fn tokenize_line(chars: &[char], mut in_string: bool) -> (Vec<(usize, usize, Tok)>, bool) {
+    let mut spans = Vec::new();
+    let n = chars.len();
+    let mut i = 0;
+    if in_string {
+        // Continuation of a multi-line string: scan to closing quote.
+        let start = 0;
+        while i < n {
+            if chars[i] == '\\' {
+                i += 2;
+                continue;
+            }
+            if chars[i] == '"' {
+                i += 1;
+                in_string = false;
+                break;
+            }
+            i += 1;
+        }
+        spans.push((start, i, Tok::StringLit));
+    }
+    while i < n {
+        let c = chars[i];
+        if c.is_whitespace() {
+            i += 1;
+            continue;
+        }
+        match c {
+            ';' => {
+                spans.push((i, n, Tok::Comment));
+                i = n;
+            }
+            '"' => {
+                let start = i;
+                i += 1;
+                in_string = true;
+                while i < n {
+                    if chars[i] == '\\' {
+                        i += 2;
+                        continue;
+                    }
+                    if chars[i] == '"' {
+                        i += 1;
+                        in_string = false;
+                        break;
+                    }
+                    i += 1;
+                }
+                spans.push((start, i, Tok::StringLit));
+            }
+            '#' if i + 1 < n && chars[i + 1] == '\\' => {
+                let start = i;
+                i += 3.min(n - i); // #\ + one char
+                spans.push((start, i, Tok::Char));
+            }
+            '#' if i + 1 < n && chars[i + 1] == '\'' => {
+                spans.push((i, i + 2, Tok::Quote));
+                i += 2;
+            }
+            '(' | ')' | '[' | ']' => {
+                spans.push((i, i + 1, Tok::Paren));
+                i += 1;
+            }
+            '\'' | '`' => {
+                spans.push((i, i + 1, Tok::Quote));
+                i += 1;
+            }
+            ',' => {
+                let end = if i + 1 < n && chars[i + 1] == '@' { i + 2 } else { i + 1 };
+                spans.push((i, end, Tok::Quote));
+                i = end;
+            }
+            ':' => {
+                let start = i;
+                i += 1;
+                while i < n && !is_delim(chars[i]) {
+                    i += 1;
+                }
+                spans.push((start, i, Tok::Keyword));
+            }
+            _ => {
+                let start = i;
+                while i < n && !is_delim(chars[i]) {
+                    i += 1;
+                }
+                let word: String = chars[start..i].iter().collect();
+                let tok = if word.parse::<f64>().is_ok()
+                    || (word.starts_with(['+', '-']) && word.len() > 1
+                        && word[1..].chars().all(|c| c.is_ascii_digit() || c == '.'))
+                {
+                    Tok::Number
+                } else if is_special(&word) {
+                    Tok::Special
+                } else {
+                    Tok::Symbol
+                };
+                spans.push((start, i, tok));
+            }
+        }
+    }
+    (spans, in_string)
 }
 
 /// A Lisp text editor over a rope buffer.
