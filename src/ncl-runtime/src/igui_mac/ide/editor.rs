@@ -323,6 +323,12 @@ impl Editor {
     pub fn clear(&mut self) {
         self.set_text("");
     }
+    /// Move the cursor to a code-point offset (clamped), collapsing any
+    /// selection.
+    pub fn set_cursor(&mut self, offset: usize) {
+        self.set_cursor_offset(offset, false);
+        self.pref_col = self.cursor_rc().1;
+    }
     pub fn is_dirty(&self) -> bool {
         self.dirty
     }
@@ -374,6 +380,62 @@ impl Editor {
 
     fn line_text(&self, row: usize) -> String {
         codepoints_to_utf8(&self.buffer.get_line(row))
+    }
+
+    /// The top-level form whose paren range contains the cursor, as a
+    /// string. Used by "eval form at point". `None` if the cursor isn't
+    /// inside any top-level form. Bracket scan ignores strings/comments.
+    pub fn current_form(&self) -> Option<String> {
+        let cps = self.buffer.to_slice();
+        let cur = self.cursor.min(cps.len());
+        let mut depth: i32 = 0;
+        let mut start: Option<usize> = None;
+        let mut in_string = false;
+        let mut in_comment = false;
+        let mut escape = false;
+        let mut best: Option<(usize, usize)> = None;
+        for (i, &cp) in cps.iter().enumerate() {
+            let c = char::from_u32(cp).unwrap_or(' ');
+            if in_comment {
+                if c == '\n' {
+                    in_comment = false;
+                }
+                continue;
+            }
+            if in_string {
+                if escape {
+                    escape = false;
+                } else if c == '\\' {
+                    escape = true;
+                } else if c == '"' {
+                    in_string = false;
+                }
+                continue;
+            }
+            match c {
+                ';' => in_comment = true,
+                '"' => in_string = true,
+                '(' | '[' => {
+                    if depth == 0 {
+                        start = Some(i);
+                    }
+                    depth += 1;
+                }
+                ')' | ']' => {
+                    depth -= 1;
+                    if depth == 0 {
+                        if let Some(s) = start.take() {
+                            let e = i + 1;
+                            if cur >= s && cur <= e {
+                                best = Some((s, e));
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        best.map(|(s, e)| codepoints_to_utf8(&cps[s..e]))
     }
 
     pub fn selected_text(&self) -> String {

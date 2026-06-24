@@ -3,8 +3,10 @@
 //! mailbox). Ports the rich behaviour of the Windows `igui::ledit` /
 //! `igui::repl_child` panes onto Core Graphics + Core Text + AppKit events.
 
+pub mod app;
 pub mod editor;
 pub mod repl;
 
+pub use app::{Ide, IdeAction};
 pub use editor::{Editor, Theme};
 pub use repl::Repl;

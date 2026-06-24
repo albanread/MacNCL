@@ -127,7 +127,7 @@ fn main() -> ExitCode {
 #[cfg(all(target_os = "macos", feature = "mac-gui"))]
 fn run_mac_gui(_raw_args: Vec<String>) -> ExitCode {
     use ncl_runtime::igui_events::{self, IGuiEvent};
-    use ncl_runtime::igui_mac::ide::{Repl, Theme};
+    use ncl_runtime::igui_mac::ide::{Ide, IdeAction, Theme};
     use ncl_runtime::igui_mac::render::CgCanvas;
     use ncl_runtime::igui_mac::window;
     use ncl_runtime::igui_paint::{
@@ -163,28 +163,43 @@ fn run_mac_gui(_raw_args: Vec<String>) -> ExitCode {
         let area = Rect { x0: 0.0, y0: 0.0, x1: W as f32, y1: H as f32 };
         let theme = Theme::default();
         let (cw, ch, asc) = metrics(&theme.family, theme.size);
-        let mut repl = Repl::new(theme);
-        repl.set_metrics(cw, ch, asc);
-        repl.info("Booting NCL standard library…");
-        window::present(repl.render(area));
+        let mut ide = Ide::new(theme);
+        ide.set_metrics(cw, ch, asc);
+        ide.info("Booting NCL standard library…");
+        window::present(ide.render(area));
 
         let mut session = match ncl_compiler::Session::with_stdlib() {
             Ok(s) => s,
             Err(e) => {
-                repl.error(&format!("stdlib bootstrap failed: {e:?}"));
-                window::present(repl.render(area));
+                ide.error(&format!("stdlib bootstrap failed: {e:?}"));
+                window::present(ide.render(area));
                 return;
             }
         };
-        repl.info(&format!("NCL {VERSION} on Apple Silicon — ready."));
-        window::present(repl.render(area));
+        ide.info(&format!("NCL {VERSION} on Apple Silicon — ready."));
+        ide.info("Cmd-R run buffer · Cmd-Return eval form · Cmd-E editor · Cmd-L REPL");
+        window::present(ide.render(area));
 
         // Self-test: inject a canned form so eval can be verified without a
         // human typing (NCL_GUI_SELFTEST=<form>). The events flow through
         // the real mailbox + repl.handle_event + session.eval path.
         if let Some(form) = std::env::var_os("NCL_GUI_SELFTEST") {
             let form = form.to_string_lossy().into_owned();
+            let run_buffer = std::env::var_os("NCL_GUI_RUNBUFFER").is_some();
             std::thread::spawn(move || {
+                // Optionally run the editor buffer first (Cmd-R), so a form
+                // it defines is available to the REPL.
+                if run_buffer {
+                    igui_events::push(IGuiEvent::Key {
+                        child_id: 1,
+                        vkey: 0x52, // R
+                        scancode: 0,
+                        mods: ncl_runtime::igui_events::modifier::WIN,
+                        repeat: 0,
+                        down: true,
+                        time_ms: 0,
+                    });
+                }
                 for c in form.chars() {
                     igui_events::push(IGuiEvent::Char {
                         child_id: 1,
@@ -217,17 +232,17 @@ fn run_mac_gui(_raw_args: Vec<String>) -> ExitCode {
                     if std::env::var_os("NCL_GUI_DEBUG").is_some() && !is_move {
                         eprintln!("[gui] ev={ev:?}");
                     }
-                    if let Some(src) = repl.handle_event(&ev) {
+                    if let IdeAction::Eval(src) = ide.handle_event(&ev) {
                         if std::env::var_os("NCL_GUI_DEBUG").is_some() {
-                            eprintln!("[gui] SUBMIT {src:?}");
+                            eprintln!("[gui] EVAL {src:?}");
                         }
                         match session.eval(&src) {
-                            Ok(s) => repl.output(&s),
-                            Err(e) => repl.error(&format!("{e:?}")),
+                            Ok(s) => ide.output(&s),
+                            Err(e) => ide.error(&format!("{e:?}")),
                         }
                     }
                     if !is_move {
-                        window::present(repl.render(area));
+                        window::present(ide.render(area));
                     }
                 }
             }
