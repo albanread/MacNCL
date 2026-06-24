@@ -179,6 +179,32 @@ fn run_mac_gui(_raw_args: Vec<String>) -> ExitCode {
         repl.info(&format!("NCL {VERSION} on Apple Silicon — ready."));
         window::present(repl.render(area));
 
+        // Self-test: inject a canned form so eval can be verified without a
+        // human typing (NCL_GUI_SELFTEST=<form>). The events flow through
+        // the real mailbox + repl.handle_event + session.eval path.
+        if let Some(form) = std::env::var_os("NCL_GUI_SELFTEST") {
+            let form = form.to_string_lossy().into_owned();
+            std::thread::spawn(move || {
+                for c in form.chars() {
+                    igui_events::push(IGuiEvent::Char {
+                        child_id: 1,
+                        codepoint: c as i64,
+                        mods: 0,
+                        time_ms: 0,
+                    });
+                }
+                igui_events::push(IGuiEvent::Key {
+                    child_id: 1,
+                    vkey: 0x0D, // Return
+                    scancode: 0,
+                    mods: 0,
+                    repeat: 0,
+                    down: true,
+                    time_ms: 0,
+                });
+            });
+        }
+
         loop {
             match igui_events::next_event(-1) {
                 None | Some(IGuiEvent::FrameClose) | Some(IGuiEvent::Close { .. }) => break,
@@ -188,7 +214,13 @@ fn run_mac_gui(_raw_args: Vec<String>) -> ExitCode {
                         &ev,
                         IGuiEvent::Mouse { op, .. } if *op == igui_events::mouse_op::MOVE
                     );
+                    if std::env::var_os("NCL_GUI_DEBUG").is_some() && !is_move {
+                        eprintln!("[gui] ev={ev:?}");
+                    }
                     if let Some(src) = repl.handle_event(&ev) {
+                        if std::env::var_os("NCL_GUI_DEBUG").is_some() {
+                            eprintln!("[gui] SUBMIT {src:?}");
+                        }
                         match session.eval(&src) {
                             Ok(s) => repl.output(&s),
                             Err(e) => repl.error(&format!("{e:?}")),
