@@ -68,7 +68,13 @@ fn repaint(image_view: &NSImageView, w: f64, h: f64, mtm: MainThreadMarker) {
             None => return,
         }
     };
-    let mut canvas = CgCanvas::new(w as usize, h as usize);
+    // Render at the display's backing scale so text is crisp on Retina.
+    let scale = image_view
+        .window()
+        .map(|win| win.backingScaleFactor())
+        .filter(|s| *s >= 1.0)
+        .unwrap_or(2.0);
+    let mut canvas = CgCanvas::new_scaled(w as usize, h as usize, scale);
     canvas.execute(&cmds);
     // Debug: dump the latest presented frame to a PPM (overwritten each
     // repaint, which only fires when dirty) so window content is

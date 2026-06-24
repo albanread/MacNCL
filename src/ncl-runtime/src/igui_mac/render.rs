@@ -66,11 +66,16 @@ fn build_line(run: &TextRun) -> Option<(CTLine, f32)> {
     Some((line, ascent))
 }
 
-/// A headless Core Graphics drawing surface sized `width`×`height`.
+/// A headless Core Graphics drawing surface. Drawing happens in **points**
+/// (`pw`×`ph`); the backing bitmap is `scale`× larger in each axis, so on a
+/// Retina display the rasterised output (and the `CGImage` from
+/// `cg_image`) is full-resolution while `SurfaceCmd` coordinates stay in
+/// points.
 pub struct CgCanvas {
     ctx: CGContext,
-    width: usize,
-    height: usize,
+    pw: usize,
+    ph: usize,
+    scale: f64,
 }
 
 #[inline]
@@ -92,31 +97,48 @@ fn circle_rect(c: Point, radius: f32) -> CGRect {
 }
 
 impl CgCanvas {
-    /// Create a `width`×`height` RGBA bitmap canvas with a transparent
-    /// backing store and the IR-coordinate flip already applied.
+    /// Create a `width`×`height` point canvas at 1× (memory row y == IR y).
     pub fn new(width: usize, height: usize) -> Self {
+        Self::new_scaled(width, height, 1.0)
+    }
+
+    /// Create a `pw`×`ph` **point** canvas whose backing bitmap is `scale`×
+    /// larger per axis (HiDPI). Drawing is in points; pixels are crisp.
+    pub fn new_scaled(pw: usize, ph: usize, scale: f64) -> Self {
+        let scale = if scale >= 1.0 { scale } else { 1.0 };
+        let pix_w = ((pw as f64) * scale).round() as usize;
+        let pix_h = ((ph as f64) * scale).round() as usize;
         let cs = CGColorSpace::create_device_rgb();
         let ctx = CGContext::create_bitmap_context(
             None,
-            width,
-            height,
+            pix_w,
+            pix_h,
             8,
-            width * 4,
+            pix_w * 4,
             &cs,
             kCGImageAlphaPremultipliedLast,
         );
-        // Flip to top-left, y-down so IR coordinates map 1:1 and memory
-        // row y == IR y.
-        ctx.translate(0.0, height as f64);
+        // Flip to top-left, y-down, then scale points→pixels. With this CTM a
+        // point (x, y) lands at memory (row y*scale, col x*scale).
+        ctx.translate(0.0, pix_h as f64);
         ctx.scale(1.0, -1.0);
-        Self { ctx, width, height }
+        ctx.scale(scale, scale);
+        Self { ctx, pw, ph, scale }
     }
 
+    fn pix_w(&self) -> usize {
+        ((self.pw as f64) * self.scale).round() as usize
+    }
+    fn pix_h(&self) -> usize {
+        ((self.ph as f64) * self.scale).round() as usize
+    }
+
+    /// Logical (point) width / height.
     pub fn width(&self) -> usize {
-        self.width
+        self.pw
     }
     pub fn height(&self) -> usize {
-        self.height
+        self.ph
     }
 
     #[inline]
@@ -148,7 +170,7 @@ impl CgCanvas {
                 self.fill(*color);
                 ctx.fill_rect(CGRect::new(
                     &CGPoint::new(0.0, 0.0),
-                    &CGSize::new(self.width as f64, self.height as f64),
+                    &CGSize::new(self.pw as f64, self.ph as f64),
                 ));
             }
             SurfaceCmd::PresentHint => {}
@@ -478,8 +500,8 @@ impl CgCanvas {
     /// converting channel order and premultiplying. Bypasses the CTM —
     /// the canvas fast path always blits a full frame at the origin.
     fn blit_bgra(&mut self, dx: i64, dy: i64, w: usize, h: usize, pixels: &[u32]) {
-        let cw = self.width;
-        let ch = self.height;
+        let cw = self.pix_w();
+        let ch = self.pix_h();
         let stride = self.ctx.bytes_per_row();
         let buf = self.ctx.data();
         for sy in 0..h {
@@ -527,7 +549,7 @@ impl CgCanvas {
     /// Dump the canvas as a binary PPM (P6, RGB) for eyeballing. No
     /// image-crate dependency; alpha is dropped.
     pub fn to_ppm(&mut self) -> Vec<u8> {
-        let (w, h) = (self.width, self.height);
+        let (w, h) = (self.pix_w(), self.pix_h());
         let stride = self.ctx.bytes_per_row();
         let data = self.ctx.data();
         let mut out = format!("P6\n{w} {h}\n255\n").into_bytes();
@@ -777,6 +799,25 @@ mod tests {
             label("(defun hi () 42)", 30.0, 250.0, c8(168, 218, 255)),
         ]);
         std::fs::write(out, c.to_ppm()).expect("write ppm");
+    }
+
+    #[test]
+    fn hidpi_renders_at_2x() {
+        // 16×16 points at 2× → 32×32 pixel backing store.
+        let mut c = CgCanvas::new_scaled(16, 16, 2.0);
+        assert_eq!((c.width(), c.height()), (16, 16)); // logical points
+        c.execute(&[
+            SurfaceCmd::Clear { color: blue() },
+            SurfaceCmd::FillRect {
+                rect: Rect { x0: 0.0, y0: 0.0, x1: 8.0, y1: 8.0 },
+                corner_radius: 0.0,
+                color: red(),
+            },
+        ]);
+        // Point (4,4) → pixel (8,8), inside the red top-left quadrant.
+        assert_eq!(c.pixel(8, 8), [255, 0, 0, 255]);
+        // Pixel (24,24) → point (12,12), outside the rect → blue.
+        assert_eq!(c.pixel(24, 24), [0, 0, 255, 255]);
     }
 
     #[test]
