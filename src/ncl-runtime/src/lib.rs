@@ -32,6 +32,9 @@ pub mod igui;
 /// Platform-neutral iGui drawing IR (`SurfaceCmd` & friends), shared by
 /// the Windows Direct2D executor and the macOS Core Graphics renderer.
 pub mod igui_paint;
+/// Platform-neutral iGui event mailbox (`IGuiEvent` + the GUI→Lisp
+/// dispatcher), shared by the Windows and macOS windowing layers.
+pub mod igui_events;
 /// macOS iGui backend: Core Graphics / Core Text renderer for the
 /// `SurfaceCmd` IR (Cocoa window + Metal surface land here too).
 #[cfg(target_os = "macos")]

@@ -16,6 +16,7 @@
 //!
 //! See docs/PORTING_DESIGN.md §4.5–4.6.
 
+pub mod events;
 pub mod render;
 
 pub use render::CgCanvas;
