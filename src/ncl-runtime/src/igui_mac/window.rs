@@ -1,27 +1,28 @@
-//! Cocoa windowing for iGui (feature `mac-gui`).
+//! Cocoa windowing for iGui (feature `mac-gui`) — **multi-window**.
 //!
-//! The macOS analogue of `igui::window::run`: it takes the calling thread
-//! as the **UI thread** (macOS *requires* AppKit on the main thread),
-//! brings up an `NSApplication` + `NSWindow`, spawns the Lisp worker on a
-//! background thread, installs a local `NSEvent` monitor that translates
-//! input into `IGuiEvent`s and pushes them into the shared mailbox
-//! (`crate::igui_events`), and runs the AppKit event loop.
+//! macOS requires all AppKit work on the main thread, while NCL runs Lisp
+//! on a worker thread. So the worker never touches `NSWindow` directly: it
+//! posts typed [`UiCmd`]s (open / close / set-title) onto a queue and calls
+//! [`present`] with a `SurfaceCmd` batch per window id. A main-thread timer
+//! drains the queue (creating/closing real windows via [`WindowManager`])
+//! and repaints any window whose batch changed. A local `NSEvent` monitor
+//! tags each event with the id of the window it came from and pushes it
+//! into the shared mailbox (`crate::igui_events`).
 //!
-//! This is the windowing + event-boundary half of Phase 2.2. Live
-//! presentation of a `CgCanvas` into the window (via `NSImageView` + a
-//! `CGImage` bridge) is the next mechanical step — the renderer itself is
-//! already complete and unit-tested in `render.rs`. See PORTING_DESIGN.md
-//! §4.6.
+//! This is the side-window model: every `open-child` from Lisp becomes its
+//! own `NSWindow`. The IDE is just window id 1.
 //!
-//! Build/run with `--features mac-gui`. Requires a logged-in GUI session
-//! (WindowServer); it cannot run fully headless.
+//! Build/run with `--features mac-gui`. Needs a logged-in GUI session.
 
+use std::cell::RefCell;
+use std::collections::{HashMap, HashSet, VecDeque};
 use std::ptr::NonNull;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::rc::Rc;
 use std::sync::{Arc, Mutex, OnceLock};
 
 use block2::RcBlock;
 use foreign_types::ForeignType;
+use objc2::rc::Retained;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent, NSEventMask,
@@ -35,72 +36,202 @@ use crate::igui_mac::events as ev;
 use crate::igui_mac::render::CgCanvas;
 use crate::igui_paint::SurfaceCmd;
 
-// ── Frame presentation: worker thread sets a frame, the main-thread
-// timer renders and blits it into the window's NSImageView ──────────────
+/// The IDE / main window's id.
+pub const MAIN_ID: i64 = 1;
 
-static FRAME: OnceLock<Mutex<Option<Arc<Vec<SurfaceCmd>>>>> = OnceLock::new();
-static DIRTY: AtomicBool = AtomicBool::new(false);
+// ── Worker → main-thread command queue ────────────────────────────────
 
-fn frame_slot() -> &'static Mutex<Option<Arc<Vec<SurfaceCmd>>>> {
-    FRAME.get_or_init(|| Mutex::new(None))
+enum UiCmd {
+    Open { id: i64, w: f64, h: f64, title: String },
+    Close { id: i64 },
+    Title { id: i64, title: String },
 }
 
-/// Present a frame: store the `SurfaceCmd` list and mark the window dirty.
-/// Safe to call from the Lisp worker thread — the main-thread timer reads
-/// the slot and repaints. This is the macOS analogue of `batch::submit`.
-pub fn present(cmds: Vec<SurfaceCmd>) {
-    *frame_slot()
+fn cmd_queue() -> &'static Mutex<VecDeque<UiCmd>> {
+    static Q: OnceLock<Mutex<VecDeque<UiCmd>>> = OnceLock::new();
+    Q.get_or_init(|| Mutex::new(VecDeque::new()))
+}
+
+fn post(cmd: UiCmd) {
+    cmd_queue().lock().unwrap_or_else(|e| e.into_inner()).push_back(cmd);
+}
+
+/// Open a side window (worker-callable). The window appears on the next
+/// main-thread tick. Idempotent per id.
+pub fn open_window(id: i64, w: f64, h: f64, title: &str) {
+    post(UiCmd::Open { id, w, h, title: title.to_string() });
+}
+pub fn close_window(id: i64) {
+    post(UiCmd::Close { id });
+}
+pub fn set_window_title(id: i64, title: &str) {
+    post(UiCmd::Title { id, title: title.to_string() });
+}
+
+// ── Per-window batch store ────────────────────────────────────────────
+
+fn batches() -> &'static Mutex<HashMap<i64, Arc<Vec<SurfaceCmd>>>> {
+    static B: OnceLock<Mutex<HashMap<i64, Arc<Vec<SurfaceCmd>>>>> = OnceLock::new();
+    B.get_or_init(|| Mutex::new(HashMap::new()))
+}
+fn dirty() -> &'static Mutex<HashSet<i64>> {
+    static D: OnceLock<Mutex<HashSet<i64>>> = OnceLock::new();
+    D.get_or_init(|| Mutex::new(HashSet::new()))
+}
+
+/// Present a `SurfaceCmd` batch to window `id` (worker-callable). The
+/// main-thread timer renders it on the next tick.
+pub fn present(id: i64, cmds: Vec<SurfaceCmd>) {
+    batches()
         .lock()
-        .unwrap_or_else(|e| e.into_inner()) = Some(Arc::new(cmds));
-    DIRTY.store(true, Ordering::Release);
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(id, Arc::new(cmds));
+    dirty().lock().unwrap_or_else(|e| e.into_inner()).insert(id);
 }
 
-/// Render the current frame (if dirty) into `image_view` at `w`×`h`
-/// points. Runs on the main thread from the repaint timer.
-fn repaint(image_view: &NSImageView, w: f64, h: f64, mtm: MainThreadMarker) {
-    if !DIRTY.swap(false, Ordering::AcqRel) {
-        return;
+/// Present to the main (IDE) window.
+pub fn present_main(cmds: Vec<SurfaceCmd>) {
+    present(MAIN_ID, cmds);
+}
+
+fn take_batch(id: i64) -> Option<Arc<Vec<SurfaceCmd>>> {
+    batches().lock().unwrap_or_else(|e| e.into_inner()).get(&id).cloned()
+}
+
+// ── Main-thread window registry ───────────────────────────────────────
+
+struct WinEntry {
+    window: Retained<NSWindow>,
+    view: Retained<NSImageView>,
+    w: f64,
+    h: f64,
+}
+
+struct WindowManager {
+    wins: HashMap<i64, WinEntry>,
+    mtm: MainThreadMarker,
+}
+
+impl WindowManager {
+    fn new(mtm: MainThreadMarker) -> Self {
+        Self { wins: HashMap::new(), mtm }
     }
-    let cmds = {
-        let guard = frame_slot().lock().unwrap_or_else(|e| e.into_inner());
-        match guard.as_ref() {
-            Some(c) => Arc::clone(c),
-            None => return,
+
+    fn open(&mut self, id: i64, w: f64, h: f64, title: &str) {
+        if self.wins.contains_key(&id) {
+            return;
         }
-    };
-    // Render at the display's backing scale so text is crisp on Retina.
-    let scale = image_view
-        .window()
-        .map(|win| win.backingScaleFactor())
-        .filter(|s| *s >= 1.0)
-        .unwrap_or(2.0);
-    let mut canvas = CgCanvas::new_scaled(w as usize, h as usize, scale);
-    canvas.execute(&cmds);
-    // Debug: dump the latest presented frame to a PPM (overwritten each
-    // repaint, which only fires when dirty) so window content is
-    // inspectable without a screen grab.
-    if let Some(path) = std::env::var_os("NCL_IGUI_DUMP") {
-        let _ = std::fs::write(path, canvas.to_ppm());
+        let mtm = self.mtm;
+        let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, h));
+        let style = NSWindowStyleMask::Titled
+            | NSWindowStyleMask::Closable
+            | NSWindowStyleMask::Miniaturizable
+            | NSWindowStyleMask::Resizable;
+        let window = unsafe {
+            NSWindow::initWithContentRect_styleMask_backing_defer(
+                mtm.alloc::<NSWindow>(),
+                rect,
+                style,
+                NSBackingStoreType::Buffered,
+                false,
+            )
+        };
+        window.setTitle(&NSString::from_str(title));
+        window.center();
+        let view = NSImageView::new(mtm);
+        window.setContentView(Some(&view));
+        window.makeKeyAndOrderFront(None);
+        self.wins.insert(id, WinEntry { window, view, w, h });
+        // Show any batch already presented for this id.
+        dirty().lock().unwrap_or_else(|e| e.into_inner()).insert(id);
     }
-    let Some(img) = canvas.cg_image() else { return };
-    // Bridge the servo `core_graphics` CGImage to objc2's `&CGImage`:
-    // both are opaque `CGImageRef` handles to the same object.
-    let cg_ref = img.as_ptr();
-    // SAFETY: `cg_ref` is a live CGImageRef for the duration of this call;
-    // `initWithCGImage_size` retains it before we drop `img`.
-    let objc_img: &CGImage = unsafe { &*(cg_ref as *const CGImage) };
-    let ns_image = NSImage::initWithCGImage_size(mtm.alloc::<NSImage>(), objc_img, NSSize::new(w, h));
-    image_view.setImage(Some(&ns_image));
+
+    fn close(&mut self, id: i64) {
+        if let Some(e) = self.wins.remove(&id) {
+            e.window.close();
+        }
+    }
+
+    fn set_title(&mut self, id: i64, title: &str) {
+        if let Some(e) = self.wins.get(&id) {
+            e.window.setTitle(&NSString::from_str(title));
+        }
+    }
+
+    /// id of the window an event belongs to (by `NSEvent.window`), or
+    /// MAIN_ID as a fallback.
+    fn id_for_window(&self, win: Option<Retained<NSWindow>>) -> i64 {
+        if let Some(w) = win {
+            let wp = Retained::as_ptr(&w);
+            for (id, e) in &self.wins {
+                if Retained::as_ptr(&e.window) == wp {
+                    return *id;
+                }
+            }
+        }
+        MAIN_ID
+    }
+
+    fn height_of(&self, id: i64) -> f64 {
+        self.wins.get(&id).map(|e| e.h).unwrap_or(0.0)
+    }
+
+    fn repaint(&self, id: i64) {
+        let Some(entry) = self.wins.get(&id) else { return };
+        let Some(cmds) = take_batch(id) else { return };
+        let scale = entry
+            .view
+            .window()
+            .map(|win| win.backingScaleFactor())
+            .filter(|s| *s >= 1.0)
+            .unwrap_or(2.0);
+        let mut canvas = CgCanvas::new_scaled(entry.w as usize, entry.h as usize, scale);
+        canvas.execute(&cmds);
+        // Debug frame dumps: main window → NCL_IGUI_DUMP, any other → NCL_IGUI_DUMP2.
+        let dump_var = if id == MAIN_ID { "NCL_IGUI_DUMP" } else { "NCL_IGUI_DUMP2" };
+        if let Some(path) = std::env::var_os(dump_var) {
+            let _ = std::fs::write(path, canvas.to_ppm());
+        }
+        let Some(img) = canvas.cg_image() else { return };
+        let cg_ref = img.as_ptr();
+        // SAFETY: live CGImageRef; initWithCGImage_size retains it.
+        let objc_img: &CGImage = unsafe { &*(cg_ref as *const CGImage) };
+        let ns_image = NSImage::initWithCGImage_size(
+            self.mtm.alloc::<NSImage>(),
+            objc_img,
+            NSSize::new(entry.w, entry.h),
+        );
+        entry.view.setImage(Some(&ns_image));
+    }
+
+    fn drain_commands(&mut self) {
+        let cmds: Vec<UiCmd> =
+            cmd_queue().lock().unwrap_or_else(|e| e.into_inner()).drain(..).collect();
+        for c in cmds {
+            match c {
+                UiCmd::Open { id, w, h, title } => self.open(id, w, h, &title),
+                UiCmd::Close { id } => self.close(id),
+                UiCmd::Title { id, title } => self.set_title(id, &title),
+            }
+        }
+    }
+
+    fn repaint_dirty(&self) {
+        let ids: Vec<i64> = {
+            let mut d = dirty().lock().unwrap_or_else(|e| e.into_inner());
+            d.drain().collect()
+        };
+        for id in ids {
+            self.repaint(id);
+        }
+    }
 }
 
-/// The single content child's id for this first single-window bring-up.
-/// The full child registry (one id per pane) arrives with the pane port.
-const CONTENT_CHILD_ID: i64 = 1;
+// ── Entry point ───────────────────────────────────────────────────────
 
-/// Open the iGui main window and run the AppKit event loop on the calling
+/// Open the main (IDE) window and run the AppKit event loop on the calling
 /// (main) thread, with `worker` running the Lisp side on a background
-/// thread. Returns when the app terminates. `Err` if not on the main
-/// thread.
+/// thread. Returns when the app terminates.
 pub fn run<F>(title: &str, width: f64, height: f64, worker: F) -> Result<(), String>
 where
     F: FnOnce() + Send + 'static,
@@ -108,53 +239,35 @@ where
     let mtm = MainThreadMarker::new()
         .ok_or_else(|| "igui_mac::run must be called on the main thread".to_string())?;
 
-    // Make sure the GUI→Lisp dispatcher is running before any event fires.
     igui_events::install();
 
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
 
-    // Build the main window.
-    let content_rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(width, height));
-    let style = NSWindowStyleMask::Titled
-        | NSWindowStyleMask::Closable
-        | NSWindowStyleMask::Miniaturizable
-        | NSWindowStyleMask::Resizable;
-    let window = unsafe {
-        NSWindow::initWithContentRect_styleMask_backing_defer(
-            mtm.alloc::<NSWindow>(),
-            content_rect,
-            style,
-            NSBackingStoreType::Buffered,
-            false,
-        )
-    };
-    window.setTitle(&NSString::from_str(title));
-    window.center();
+    let manager = Rc::new(RefCell::new(WindowManager::new(mtm)));
+    manager.borrow_mut().open(MAIN_ID, width, height, title);
 
-    // Content view: an NSImageView we blit the rendered CgCanvas into.
-    let image_view = NSImageView::new(mtm);
-    window.setContentView(Some(&image_view));
-
-    // Repaint timer (~60 Hz): on the main thread, render the latest frame
-    // and show it. Cheap when not dirty (early-out).
-    let iv_for_timer = image_view.clone();
-    let repaint_block = RcBlock::new(move |_t: NonNull<NSTimer>| {
-        repaint(&iv_for_timer, width, height, mtm);
+    // Repaint + command-drain timer (~60 Hz) on the main thread.
+    let mgr_t = Rc::clone(&manager);
+    let tick = RcBlock::new(move |_t: NonNull<NSTimer>| {
+        // Drain commands (creates/closes windows), then repaint dirty ones.
+        mgr_t.borrow_mut().drain_commands();
+        mgr_t.borrow().repaint_dirty();
     });
     let _timer = unsafe {
-        NSTimer::scheduledTimerWithTimeInterval_repeats_block(1.0 / 60.0, true, &repaint_block)
+        NSTimer::scheduledTimerWithTimeInterval_repeats_block(1.0 / 60.0, true, &tick)
     };
 
-    // Translate every key/mouse event into an IGuiEvent and push it to the
-    // shared mailbox. The closure returns the event pointer unchanged so
-    // normal processing (menus, the close button) still happens.
-    let view_height = height;
+    // Event monitor: tag each event with its window's id.
+    let mgr_e = Rc::clone(&manager);
     let handler = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
-        // SAFETY: AppKit hands us a live, non-null NSEvent for the
-        // duration of the call.
         let e = unsafe { event.as_ref() };
-        dispatch_event(e, view_height);
+        let (id, h) = {
+            let m = mgr_e.borrow();
+            let id = m.id_for_window(e.window(mtm));
+            (id, m.height_of(id))
+        };
+        dispatch_event(e, id, h);
         event.as_ptr()
     });
     let mask = NSEventMask::KeyDown
@@ -166,15 +279,10 @@ where
         | NSEventMask::MouseMoved
         | NSEventMask::LeftMouseDragged
         | NSEventMask::ScrollWheel;
-    // Keep the monitor alive for the life of the app.
     let _monitor = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &handler) };
 
-    window.makeKeyAndOrderFront(None);
     app.activate();
 
-    // Spawn the Lisp worker on a background thread (mirrors the Windows
-    // model: UI on thread 0, Lisp on a worker). 8 MiB stack — the Lisp
-    // stdlib bootstrap recurses deeply through macroexpansion + codegen.
     std::thread::Builder::new()
         .name("ncl-lisp-worker".into())
         .stack_size(8 * 1024 * 1024)
@@ -185,8 +293,10 @@ where
     Ok(())
 }
 
-/// Translate one `NSEvent` and push the resulting `IGuiEvent`(s).
-fn dispatch_event(e: &NSEvent, view_height: f64) {
+/// Translate one `NSEvent` for window `child_id` and push the resulting
+/// `IGuiEvent`(s). `view_height` is that window's content height (for the
+/// y-flip).
+fn dispatch_event(e: &NSEvent, child_id: i64, view_height: f64) {
     let flags = e.modifierFlags().0 as u64;
     let t = e.r#type();
 
@@ -196,42 +306,21 @@ fn dispatch_event(e: &NSEvent, view_height: f64) {
         let ch = e
             .charactersIgnoringModifiers()
             .and_then(|s| s.to_string().chars().next());
-        igui_events::push(ev::key_event(
-            CONTENT_CHILD_ID,
-            keycode,
-            ch,
-            flags,
-            e.isARepeat(),
-            down,
-            0,
-        ));
-        // On key-down, also emit a Char event for printable input, mirroring
-        // the Win32 WM_KEYDOWN + WM_CHAR pairing the panes expect.
+        igui_events::push(ev::key_event(child_id, keycode, ch, flags, e.isARepeat(), down, 0));
         if down {
             if let Some(c) = ch {
                 if !c.is_control() {
-                    igui_events::push(ev::char_event(CONTENT_CHILD_ID, c as u32, flags, 0));
+                    igui_events::push(ev::char_event(child_id, c as u32, flags, 0));
                 }
             }
         }
         return;
     }
 
-    // Mouse events: convert window-space (bottom-left) to top-left view space.
     let mouse = |op: i64, button: i64| {
         let p: NSPoint = e.locationInWindow();
         let y = ev::to_top_left_y(p.y, view_height);
-        igui_events::push(ev::mouse_event(
-            CONTENT_CHILD_ID,
-            p.x,
-            y,
-            op,
-            button,
-            flags,
-            0,
-            0,
-            0,
-        ));
+        igui_events::push(ev::mouse_event(child_id, p.x, y, op, button, flags, 0, 0, 0));
     };
 
     if t == NSEventType::LeftMouseDown {
@@ -251,7 +340,7 @@ fn dispatch_event(e: &NSEvent, view_height: f64) {
         let y = ev::to_top_left_y(p.y, view_height);
         let dy = e.scrollingDeltaY();
         igui_events::push(ev::mouse_event(
-            CONTENT_CHILD_ID,
+            child_id,
             p.x,
             y,
             ev::ns_mouse::wheel(),

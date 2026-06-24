@@ -166,18 +166,45 @@ fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
         let mut ide = Ide::new(theme);
         ide.set_metrics(cw, ch, asc);
         ide.info("Booting NCL standard library…");
-        window::present(ide.render(area));
+        window::present_main(ide.render(area));
 
         let mut session = match ncl_compiler::Session::with_stdlib() {
             Ok(s) => s,
             Err(e) => {
                 ide.error(&format!("stdlib bootstrap failed: {e:?}"));
-                window::present(ide.render(area));
+                window::present_main(ide.render(area));
                 return;
             }
         };
         ide.info(&format!("NCL {VERSION} on Apple Silicon — ready."));
         ide.info("Cmd-R run buffer · Cmd-Return eval form · Cmd-S save · Cmd-E/L focus");
+
+        // Demo: open a graphics side-window and draw a scene (proves the
+        // multi-window + SurfaceCmd canvas path that graphics apps use).
+        if std::env::var_os("NCL_GUI_DEMO_WINDOW").is_some() {
+            use ncl_runtime::igui_paint::{Point, Rect as R, SurfaceCmd as C};
+            let rgb = |r: u8, g: u8, b: u8| Rgba {
+                r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: 1.0,
+            };
+            let txt = |s: &str, x: f32, y: f32, col: Rgba| C::DrawTextRun {
+                run: TextRun {
+                    text: s.into(), origin: Point { x, y }, family: "Menlo".into(), size: 20.0,
+                    weight: 400, style: FontStyle::Normal, stretch: FontStretch::Normal,
+                    locale: "en-us".into(), color: col, max_width: None,
+                    alignment: TextAlign::Leading, trimming: TextTrimming::None,
+                },
+            };
+            window::open_window(2, 480.0, 360.0, "Shapes");
+            window::present(2, vec![
+                C::Clear { color: rgb(30, 36, 46) },
+                C::FillRect { rect: R { x0: 40.0, y0: 40.0, x1: 140.0, y1: 140.0 }, corner_radius: 0.0, color: rgb(235, 76, 76) },
+                C::StrokeRect { rect: R { x0: 200.0, y0: 40.0, x1: 320.0, y1: 140.0 }, corner_radius: 0.0, half_thickness: 1.5, color: rgb(76, 217, 242) },
+                C::FillCircle { center: Point { x: 260.0, y: 90.0 }, radius: 38.0, color: rgb(76, 217, 242) },
+                C::DrawLine { p0: Point { x: 40.0, y: 200.0 }, p1: Point { x: 320.0, y: 280.0 }, half_thickness: 2.0, color: rgb(102, 230, 102) },
+                txt("Hello from NewCormanLisp!", 40.0, 300.0, rgb(255, 255, 255)),
+            ]);
+            ide.info("; opened graphics window (id 2)");
+        }
         // Load every `.lisp`/`.lsp`/`.cl` file argument into its own tab.
         for path in raw_args.iter().filter(|a| {
             !a.starts_with('-')
@@ -185,7 +212,7 @@ fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
         }) {
             ide.load_file(path);
         }
-        window::present(ide.render(area));
+        window::present_main(ide.render(area));
 
         // Self-test: inject a canned form so eval can be verified without a
         // human typing (NCL_GUI_SELFTEST=<form>). The events flow through
@@ -259,7 +286,7 @@ fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
                         }
                     }
                     if !is_move {
-                        window::present(ide.render(area));
+                        window::present_main(ide.render(area));
                     }
                 }
             }

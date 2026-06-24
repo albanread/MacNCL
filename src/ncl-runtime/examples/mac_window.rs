@@ -66,11 +66,11 @@ fn main() {
     };
 
     let worker = move || {
-        window::present(scene(W / 2.0, H / 2.0));
+        window::present_main(scene(W / 2.0, H / 2.0));
         loop {
             match igui_events::next_event(-1) {
                 Some(IGuiEvent::Mouse { x, y, .. }) => {
-                    window::present(scene(x as f32, y as f32));
+                    window::present_main(scene(x as f32, y as f32));
                 }
                 Some(IGuiEvent::Key { vkey, down, .. }) if down => {
                     println!("[worker] key vkey={vkey:#x}");
