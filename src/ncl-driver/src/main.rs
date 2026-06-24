@@ -178,8 +178,8 @@ fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
         };
         ide.info(&format!("NCL {VERSION} on Apple Silicon — ready."));
         ide.info("Cmd-R run buffer · Cmd-Return eval form · Cmd-S save · Cmd-E/L focus");
-        // Load a `.lisp`/`.lsp`/`.cl` file argument into the editor.
-        if let Some(path) = raw_args.iter().find(|a| {
+        // Load every `.lisp`/`.lsp`/`.cl` file argument into its own tab.
+        for path in raw_args.iter().filter(|a| {
             !a.starts_with('-')
                 && (a.ends_with(".lisp") || a.ends_with(".lsp") || a.ends_with(".cl"))
         }) {
