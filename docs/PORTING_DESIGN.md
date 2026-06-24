@@ -230,6 +230,30 @@ one process-wide Metal device + Core Text; per child a `CAMetalLayer`-backed `NS
 4. **2.3** The `DrawTarget` trait + port `text_view`/`repl_child`/`ledit`/`log_view`.
 5. **2.4** Menus (`NSMenu`), cursors, system colors/appearance, then `docpane`.
 
+### 4.7 Phase 2.0–2.2 results (2026-06-24) — renderer + event boundary live ✅
+
+- **2.0** `igui_paint` (drawing IR) and `igui_events` (mailbox) extracted as
+  platform-neutral modules; `igui::batch`/`igui::channels` re-export them, Windows
+  untouched. macOS deps added (`core-graphics`/`core-text`/`core-foundation`).
+- **2.1** `igui_mac::render::CgCanvas` — Core Graphics + Core Text rasteriser for
+  `SurfaceCmd`, headless (CGBitmapContext). Shapes, rounded rects, ovals/circles,
+  arcs, paths, clip/offset, overlays, BGRA blit, styled text + measurement.
+  **10 pixel-assertion tests**; the gated `demo_scene` renders a showcase PNG.
+- **2.2** `igui_mac::events` — pure `NSEvent`→`IGuiEvent` translation (modifier
+  bits, macOS keycodes/chars → Win32 VKs, y-flip), **6 unit tests**.
+  `igui_mac::window::run` (feature `mac-gui`) — `NSApplication`/`NSWindow` on the
+  main thread, Lisp worker on a background thread, a local `NSEvent` monitor feeding
+  the mailbox, AppKit run loop. **Verified live**: window opens and real mouse/key
+  events arrive on the worker thread with correct coordinates.
+  Run it: `cargo run -p ncl-runtime --example mac_window --features mac-gui`.
+
+**Remaining in 2.2:** present a `CgCanvas` *into* the window (NSImageView + a
+`CGImage` bridge, or a `CAMetalLayer` for the canvas fast-path) — mechanical; the
+renderer is done. Then 2.3 (DrawTarget trait + the Rust-native panes) and 2.4.
+
+The default (headless) build never pulls AppKit: renderer + event translation are
+always built and tested; only the live window sits behind `mac-gui`.
+
 ---
 
 ## 5. Crate dependencies to neutralise on macOS
