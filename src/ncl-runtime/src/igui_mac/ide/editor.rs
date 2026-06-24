@@ -41,6 +41,18 @@ enum UndoOp {
     },
 }
 
+/// Active incremental-search state.
+struct Search {
+    query: String,
+    /// Code-point offsets of every (case-insensitive) match start.
+    matches: Vec<usize>,
+    /// Index into `matches` of the current selection.
+    idx: usize,
+    /// Cursor offset when search began; new queries select the first match
+    /// at/after this point (so the selection doesn't drift while typing).
+    start: usize,
+}
+
 /// Lisp syntax token classes, for highlighting.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Tok {
@@ -255,6 +267,8 @@ pub struct Editor {
     coalesce: Option<Coalesce>,
     clipboard: Vec<u32>,
     theme: Theme,
+    /// Active incremental search, if the user is searching (Cmd-F).
+    search: Option<Search>,
     /// Backing file, if the buffer was loaded from or saved to one.
     file_path: Option<String>,
     /// Whether to draw a line-number gutter.
@@ -283,6 +297,7 @@ impl Editor {
             coalesce: None,
             clipboard: Vec::new(),
             theme: Theme::default(),
+            search: None,
             file_path: None,
             show_gutter: true,
             visible_rows: 1,
@@ -1039,6 +1054,104 @@ impl Editor {
         None
     }
 
+    // ─── incremental search ──────────────────────────────────────────
+
+    pub fn is_searching(&self) -> bool {
+        self.search.is_some()
+    }
+
+    /// Start (or step) incremental search. If already searching, jump to
+    /// the next match.
+    pub fn start_search(&mut self) {
+        if self.search.is_some() {
+            self.search_next(false);
+        } else {
+            self.search = Some(Search {
+                query: String::new(),
+                matches: Vec::new(),
+                idx: 0,
+                start: self.cursor,
+            });
+        }
+    }
+
+    pub fn cancel_search(&mut self) {
+        self.search = None;
+    }
+
+    fn recompute_matches(&mut self) {
+        let Some(search) = self.search.as_ref() else { return };
+        let q: Vec<char> = search.query.to_lowercase().chars().collect();
+        let mut matches = Vec::new();
+        if !q.is_empty() {
+            let text = self.chars();
+            let lower: Vec<char> = text.iter().flat_map(|c| c.to_lowercase()).collect();
+            // to_lowercase can change length; fall back to per-char compare on
+            // the original to keep offsets meaningful.
+            if lower.len() == text.len() {
+                let n = text.len();
+                let m = q.len();
+                if m <= n {
+                    let mut i = 0;
+                    while i + m <= n {
+                        if lower[i..i + m] == q[..] {
+                            matches.push(i);
+                        }
+                        i += 1;
+                    }
+                }
+            }
+        }
+        // Pick the first match at/after the search start (stable while typing).
+        let start = self.search.as_ref().map(|s| s.start).unwrap_or(0);
+        let idx = matches.iter().position(|&m| m >= start).unwrap_or(0);
+        if let Some(s) = self.search.as_mut() {
+            s.matches = matches;
+            s.idx = idx;
+        }
+        self.jump_to_current_match();
+    }
+
+    fn jump_to_current_match(&mut self) {
+        if let Some(s) = self.search.as_ref() {
+            if let Some(&off) = s.matches.get(s.idx) {
+                let qlen = s.query.chars().count();
+                self.cursor = (off + qlen).min(self.buffer.len());
+                self.anchor = off;
+                self.ensure_cursor_visible();
+            }
+        }
+    }
+
+    pub fn search_next(&mut self, backward: bool) {
+        if let Some(s) = self.search.as_mut() {
+            if s.matches.is_empty() {
+                return;
+            }
+            let n = s.matches.len();
+            s.idx = if backward {
+                (s.idx + n - 1) % n
+            } else {
+                (s.idx + 1) % n
+            };
+        }
+        self.jump_to_current_match();
+    }
+
+    fn search_push(&mut self, c: char) {
+        if let Some(s) = self.search.as_mut() {
+            s.query.push(c);
+        }
+        self.recompute_matches();
+    }
+
+    fn search_backspace(&mut self) {
+        if let Some(s) = self.search.as_mut() {
+            s.query.pop();
+        }
+        self.recompute_matches();
+    }
+
     // ─── input ───────────────────────────────────────────────────────
 
     /// Handle a key-down. `vkey` is a Win32 VK code (see
@@ -1052,8 +1165,23 @@ impl Editor {
         let cmd = mods & modifier::WIN != 0;
         let ctrl = mods & modifier::CONTROL != 0;
 
+        // Incremental-search mode swallows most keys.
+        if self.search.is_some() && !cmd {
+            match vkey {
+                vk::ESCAPE => self.cancel_search(),
+                vk::RETURN => self.search_next(shift),
+                vk::BACK => self.search_backspace(),
+                _ => self.cancel_search(), // any other key ends search, then falls through
+            }
+            if vkey == vk::ESCAPE || vkey == vk::RETURN || vkey == vk::BACK {
+                return true;
+            }
+        }
+
         if cmd {
             match vkey {
+                0x46 => self.start_search(),       // Cmd-F (start / next)
+                0x47 => self.search_next(shift),   // Cmd-G (next / prev with Shift)
                 0x41 => self.select_all(),         // Cmd-A
                 0x43 => self.copy(),               // Cmd-C
                 0x58 => self.cut(),                // Cmd-X
@@ -1104,6 +1232,10 @@ impl Editor {
         if let Some(c) = char::from_u32(cp) {
             if c.is_control() {
                 return false;
+            }
+            if self.search.is_some() {
+                self.search_push(c);
+                return true;
             }
             self.insert_char(cp);
             return true;
@@ -1282,6 +1414,41 @@ impl Editor {
             }
         }
 
+        // Incremental-search match highlights + a search bar.
+        if let Some(s) = self.search.as_ref() {
+            let qlen = s.query.chars().count().max(1) as f32;
+            for (mi, &m) in s.matches.iter().enumerate() {
+                let (r, c) = self.buffer.offset_to_line_col(m);
+                if r >= self.scroll_top && r < self.scroll_top + self.visible_rows {
+                    let my = area.y0 + (r - self.scroll_top) as f32 * cell_h;
+                    let mx = text_x0 + c as f32 * cell_w;
+                    let color = if mi == s.idx {
+                        Rgba { r: 0.95, g: 0.75, b: 0.2, a: 0.55 }
+                    } else {
+                        Rgba { r: 0.5, g: 0.5, b: 0.3, a: 0.30 }
+                    };
+                    cmds.push(SurfaceCmd::SelectionRange {
+                        rect: Rect { x0: mx, y0: my, x1: mx + qlen * cell_w, y1: my + cell_h },
+                        color,
+                    });
+                }
+            }
+            let bar_y = area.y1 - cell_h - 4.0;
+            cmds.push(SurfaceCmd::FillRect {
+                rect: Rect { x0: area.x0, y0: bar_y, x1: area.x1, y1: area.y1 },
+                corner_radius: 0.0,
+                color: Rgba { r: 0.12, g: 0.13, b: 0.16, a: 1.0 },
+            });
+            let total = s.matches.len();
+            let cur = if total == 0 { 0 } else { s.idx + 1 };
+            cmds.push(mk_run(
+                format!("⌕ {}    {cur}/{total}", s.query),
+                area.x0 + 8.0,
+                bar_y + 2.0,
+                t.caret,
+            ));
+        }
+
         // Caret.
         if cur_row >= self.scroll_top && cur_row < self.scroll_top + self.visible_rows {
             let cy = area.y0 + (cur_row - self.scroll_top) as f32 * cell_h;
@@ -1456,6 +1623,37 @@ mod tests {
         e.set_cursor(3); // on the '(' of (b c)
         e.raise();
         assert_eq!(e.text(), "(b c)");
+    }
+
+    #[test]
+    fn incremental_search_finds_and_cycles() {
+        let mut e = Editor::with_text("foo bar foo baz foo");
+        e.set_cursor(0);
+        e.start_search();
+        for c in "foo".chars() {
+            e.on_char(c as u32);
+        }
+        // Three matches at offsets 0, 8, 16. Cursor jumps to first at/after 0.
+        let s = e.search.as_ref().unwrap();
+        assert_eq!(s.matches, vec![0, 8, 16]);
+        assert_eq!(s.idx, 0);
+        e.search_next(false);
+        assert_eq!(e.search.as_ref().unwrap().idx, 1);
+        e.search_next(true); // wrap back
+        assert_eq!(e.search.as_ref().unwrap().idx, 0);
+        e.cancel_search();
+        assert!(!e.is_searching());
+    }
+
+    #[test]
+    fn search_is_case_insensitive() {
+        let mut e = Editor::with_text("Foo FOO foo");
+        e.set_cursor(0);
+        e.start_search();
+        for c in "foo".chars() {
+            e.on_char(c as u32);
+        }
+        assert_eq!(e.search.as_ref().unwrap().matches, vec![0, 4, 8]);
     }
 
     #[test]
