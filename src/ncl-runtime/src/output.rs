@@ -50,3 +50,23 @@ pub fn emit(text: &str) {
         let _ = h.flush();
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn capture_round_trip() {
+        let _ = end_capture(); // clear any prior thread-local state
+        assert!(!is_capturing());
+        begin_capture();
+        assert!(is_capturing());
+        emit("hello ");
+        emit("world");
+        assert_eq!(end_capture().as_deref(), Some("hello world"));
+        assert!(!is_capturing());
+        // After capture ends, emit goes to stdout and nothing is buffered.
+        emit("");
+        assert_eq!(end_capture(), None);
+    }
+}
