@@ -17,6 +17,7 @@
 //! See docs/PORTING_DESIGN.md §4.5–4.6.
 
 pub mod events;
+pub mod ide;
 pub mod render;
 /// Cocoa windowing + AppKit event loop. Opt-in (`mac-gui`) because it
 /// pulls the objc2 AppKit bindings and needs a GUI session to run; the

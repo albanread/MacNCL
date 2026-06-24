@@ -35,6 +35,9 @@ pub mod igui_paint;
 /// Platform-neutral iGui event mailbox (`IGuiEvent` + the GUI→Lisp
 /// dispatcher), shared by the Windows and macOS windowing layers.
 pub mod igui_events;
+/// Platform-neutral rope text buffer, shared by the Windows panes and the
+/// macOS IDE. Re-exported by `igui::rope_buffer`.
+pub mod igui_text;
 /// macOS iGui backend: Core Graphics / Core Text renderer for the
 /// `SurfaceCmd` IR (Cocoa window + Metal surface land here too).
 #[cfg(target_os = "macos")]
