@@ -243,7 +243,17 @@ fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
                         if std::env::var_os("NCL_GUI_DEBUG").is_some() {
                             eprintln!("[gui] EVAL {src:?}");
                         }
-                        match session.eval(&src) {
+                        // Capture the program's printed output so
+                        // `(format t …)` / print show up in the transcript.
+                        ncl_runtime::output::begin_capture();
+                        let result = session.eval(&src);
+                        if let Some(printed) = ncl_runtime::output::end_capture() {
+                            let printed = printed.trim_end_matches('\n');
+                            if !printed.is_empty() {
+                                ide.output(printed);
+                            }
+                        }
+                        match result {
                             Ok(s) => ide.output(&s),
                             Err(e) => ide.error(&format!("{e:?}")),
                         }

@@ -556,11 +556,9 @@ pub fn run_format(
     }
 
     if dest.is_t() {
-        use std::io::Write;
-        let stdout = std::io::stdout();
-        let mut h = stdout.lock();
-        let _ = h.write_all(out.as_bytes());
-        let _ = h.flush();
+        // Routed through the redirectable sink so a host (the GUI REPL) can
+        // capture program output; defaults to process stdout.
+        crate::output::emit(&out);
         Word::NIL
     } else if dest.is_nil() {
         crate::gc_string::alloc_string_in_young(m, &out)

@@ -43,6 +43,8 @@ pub mod igui_text;
 #[cfg(target_os = "macos")]
 pub mod igui_mac;
 pub mod mutator;
+/// Redirectable stdout (lets the GUI capture `(format t …)` output).
+pub mod output;
 pub mod printer;
 pub mod random;
 pub mod stack_map;
