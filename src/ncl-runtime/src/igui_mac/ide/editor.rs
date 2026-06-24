@@ -1038,6 +1038,23 @@ impl Editor {
         }
     }
 
+    /// Expand the selection to the enclosing s-expression (structural
+    /// select). Repeated calls grow outward, one form per call.
+    pub fn select_enclosing_form(&mut self) {
+        let cs = self.chars();
+        let target = match self.selection_range() {
+            Some((lo, _)) => lo.saturating_sub(1),
+            None => self.cursor,
+        };
+        if let Some((open, close)) = sexp::enclosing(&cs, target) {
+            self.anchor = open;
+            self.cursor = (close + 1).min(self.buffer.len());
+            self.coalesce = None;
+            self.pref_col = self.cursor_rc().1;
+            self.ensure_cursor_visible();
+        }
+    }
+
     /// Pull the next sibling sexp into the enclosing form (paredit
     /// slurp-forward): `(a| b) c` → `(a| b c)`.
     pub fn slurp_forward(&mut self) {
@@ -1346,6 +1363,7 @@ impl Editor {
                 vk::LEFT if shift => self.barf_forward(),   // Ctrl-Shift-Left
                 vk::RIGHT => self.move_forward_sexp(false), // Ctrl-Right
                 vk::LEFT => self.move_backward_sexp(false), // Ctrl-Left
+                vk::UP => self.select_enclosing_form(),     // Ctrl-Up
                 0x57 => self.wrap_round(), // Ctrl-W
                 0x53 => self.splice(),     // Ctrl-S
                 0x52 => self.raise(),      // Ctrl-R
@@ -1806,6 +1824,16 @@ mod tests {
             e.on_char(c as u32);
         }
         assert_eq!(e.search.as_ref().unwrap().matches, vec![0, 4, 8]);
+    }
+
+    #[test]
+    fn select_enclosing_form_grows_outward() {
+        let mut e = Editor::with_text("(a (b c) d)");
+        e.set_cursor(5); // inside (b c)
+        e.select_enclosing_form();
+        assert_eq!(e.selected_text(), "(b c)");
+        e.select_enclosing_form(); // one level out
+        assert_eq!(e.selected_text(), "(a (b c) d)");
     }
 
     #[test]

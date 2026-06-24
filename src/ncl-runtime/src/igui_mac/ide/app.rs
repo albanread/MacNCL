@@ -277,8 +277,15 @@ impl Ide {
         match self.focus {
             Focus::Editor => {
                 if cmd && vkey == vk::RETURN {
-                    if let Some(form) = self.ed().current_form() {
-                        self.repl.info(&format!("; {form}"));
+                    // Eval the selection if there is one, else the form at point.
+                    let sel = self.ed().selected_text();
+                    let form = if !sel.trim().is_empty() {
+                        Some(sel)
+                    } else {
+                        self.ed().current_form()
+                    };
+                    if let Some(form) = form {
+                        self.repl.info(&format!("; {}", form.replace('\n', " ")));
                         return IdeAction::Eval(form);
                     }
                     return IdeAction::None;
