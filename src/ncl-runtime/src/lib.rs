@@ -29,6 +29,13 @@ pub mod heap;
 pub mod heap_common;
 #[cfg(windows)]
 pub mod igui;
+/// Platform-neutral iGui drawing IR (`SurfaceCmd` & friends), shared by
+/// the Windows Direct2D executor and the macOS Core Graphics renderer.
+pub mod igui_paint;
+/// macOS iGui backend: Core Graphics / Core Text renderer for the
+/// `SurfaceCmd` IR (Cocoa window + Metal surface land here too).
+#[cfg(target_os = "macos")]
+pub mod igui_mac;
 pub mod mutator;
 pub mod printer;
 pub mod random;

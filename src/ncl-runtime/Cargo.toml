@@ -85,5 +85,10 @@ features = [
     "Win32_System_Ole",
 ]
 
+[target.'cfg(target_os="macos")'.dependencies]
+core-foundation = "0.10.1"
+core-graphics = "0.25.0"
+core-text = "22.0.0"
+
 [lints]
 workspace = true

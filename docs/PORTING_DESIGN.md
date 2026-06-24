@@ -174,6 +174,62 @@ It shares `selkie` (pure-Rust Mermaid→IR, already portable). Re-target docpane
 renderer to whichever 2D engine §4.3 picks; `selkie` comes along for free. Lowest
 priority — gate it off for Phases 1–2.
 
+### 4.5 Phase 2 architecture — what the deep read found (2026-06-24)
+
+Three subsystem reads pinned the exact contracts. The picture:
+
+**The boundary is real but the panes are split.**
+- `batch.rs` defines `SurfaceCmd` — a **platform-neutral drawing IR** (Clear, Fill/Stroke
+  Rect/Oval/Circle, DrawLine, DrawArc, DrawPath, DrawTextRun + 3 sync text queries,
+  clip/offset/scroll, Save/RestoreRect, Mark/Caret/Selection/FocusRing, Blit). Pure
+  geometry/color/text data; its only Windows tie is the repaint trigger (`InvalidateRect`).
+- **Lisp-driven graphics + canvas panes** render *through* `SurfaceCmd`: `batch::begin`
+  → `push` → `submit` → `child.rs::execute_d2d_batch` (the single D2D chokepoint).
+- **The Rust-native workspace panes** — `text_view`, `repl_child`, `ledit`, `log_view`
+  — call Direct2D/DirectWrite **directly** in their own `paint()` (~6k LOC), bypassing
+  `SurfaceCmd`. This is the editor/REPL/log UI itself.
+
+**Mailbox & threading (portable / compatible).**
+- `channels::IGuiEvent` (Key/Char/Mouse/Focus/Resize/Close/FrameClose/Theme/Dpi/Menu/
+  Tick/EvalBuffer/ReplSubmit) is a bounded MPSC, GUI→Lisp, with per-thread window
+  filtering. `replies::Reply` is the 5s-timeout oneshot for the 3 synchronous text
+  queries. Both are platform-neutral.
+- `window::run<F: FnOnce()+Send>(worker)` takes the calling thread as the **UI thread**
+  (Win32 pump) and spawns the Lisp worker. macOS requires AppKit on the **main thread**
+  — the model already matches; `run` becomes NSApplication on thread 0 + worker.
+- ~53 Lisp functions form the public API (igui-start/-wait/-quit, open-child[-sized],
+  close-child, set-title, set-redraw-rate, next-event[-for], filter/-unfilter-window,
+  %begin/submit-batch + %emit-*, %measure-text, open-text-window + text-*, open-repl +
+  repl-*, open-doc + doc-*, canvas-open/-present, mdi-*). **This surface must be preserved.**
+
+**The unifying move: a `DrawTarget` trait.** Both `execute_d2d_batch` and the panes'
+`paint()` call the same ~20 primitives (clear, fill/stroke rect/ellipse, line, geometry,
+draw-text-layout, push/pop clip+transform, copy-rect, draw-bitmap). Define that as a
+trait; implement it twice — `D2dTarget` (Windows) and `CgTarget` (Core Graphics). Then
+`execute_batch<T: DrawTarget>` is one body, and each pane's paint is one body. This is
+the lever that makes the 6k LOC of direct-D2D panes portable without per-pane rewrites.
+
+**Surface/present contract to provide on macOS** (replacing `renderer`/`d3d`/`d2d`/`dwrite`):
+one process-wide Metal device + Core Text; per child a `CAMetalLayer`-backed `NSView`
+(create/resize/present); a begin/end-frame cycle; text via `CTFont`/`CTLine` with
+`GetMetrics`/`HitTestPoint`/`HitTestTextPosition` equivalents
+(`CTLineGetTypographicBounds`/`…StringIndexForPosition`/`…OffsetForStringIndex`).
+`canvas.rs` is already platform-neutral (BGRA32 buffer → `Blit`); reuse verbatim.
+
+### 4.6 Phase 2 execution slices
+1. **2.0** Add macOS deps (`core-graphics`/`core-text`/`core-foundation`, later
+   `objc2`/`objc2-app-kit`/`objc2-metal`/`objc2-quartz-core`). Extract the portable
+   paint types out of `batch.rs` into `igui_paint` (un-gated), re-exported by `batch.rs`
+   so Windows is untouched.
+2. **2.1** *(done first because it's verifiable headlessly)* A Core Graphics renderer
+   that rasterizes a `&[SurfaceCmd]` into a `CGBitmapContext` — **no window needed**.
+   Unit-tested by rendering a batch and asserting pixels / dumping a PNG, mirroring the
+   `doc-crate` render-to-PNG snapshot philosophy. Proves the renderer port.
+3. **2.2** Cocoa `window::run`: NSApplication/NSWindow on thread 0, `NSView`+`CAMetalLayer`
+   surface, `NSEvent`→`IGuiEvent` mailbox, marshalled `open_child`/`close`/`set_title`.
+4. **2.3** The `DrawTarget` trait + port `text_view`/`repl_child`/`ledit`/`log_view`.
+5. **2.4** Menus (`NSMenu`), cursors, system colors/appearance, then `docpane`.
+
 ---
 
 ## 5. Crate dependencies to neutralise on macOS
