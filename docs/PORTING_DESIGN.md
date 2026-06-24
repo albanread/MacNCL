@@ -247,9 +247,17 @@ one process-wide Metal device + Core Text; per child a `CAMetalLayer`-backed `NS
   events arrive on the worker thread with correct coordinates.
   Run it: `cargo run -p ncl-runtime --example mac_window --features mac-gui`.
 
-**Remaining in 2.2:** present a `CgCanvas` *into* the window (NSImageView + a
-`CGImage` bridge, or a `CAMetalLayer` for the canvas fast-path) — mechanical; the
-renderer is done. Then 2.3 (DrawTarget trait + the Rust-native panes) and 2.4.
+- **2.2c** ✅ `window::present(cmds)` (worker-thread frame submit) + a main-thread
+  60 Hz `NSTimer` that renders the latest frame to a `CgCanvas` and blits it into the
+  window's `NSImageView` (servo `CGImage` → objc2 `&CGImage` → `initWithCGImage:size:`).
+  **Verified live**: the window shows the rendered scene and a circle follows the mouse,
+  closing the loop `NSEvent → mailbox → worker → present → render → window`. Set
+  `NCL_IGUI_DUMP=path.ppm` to dump the presented frame for headless inspection.
+
+**Remaining:** wire `window::run`/`present` into `ncl-driver` (so `ncl --windows`
+launches it) and map the Lisp `igui-*` shims onto it; HiDPI (render at backing scale);
+`CAMetalLayer` for the canvas fast-path. Then 2.3 (DrawTarget trait + the Rust-native
+panes) and 2.4 (menus/cursors/colours/docpane).
 
 The default (headless) build never pulls AppKit: renderer + event translation are
 always built and tested; only the live window sits behind `mac-gui`.
