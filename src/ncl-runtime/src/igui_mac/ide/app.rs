@@ -126,7 +126,9 @@ impl Ide {
     }
 
     fn on_key(&mut self, vkey: i64, mods: i64) -> IdeAction {
-        let cmd = mods & (modifier::WIN | modifier::CONTROL) != 0;
+        // Command (WIN) drives IDE-global accelerators; Control is left for
+        // the editor's paredit bindings.
+        let cmd = mods & modifier::WIN != 0;
         // IDE-global accelerators.
         if cmd {
             match vkey {

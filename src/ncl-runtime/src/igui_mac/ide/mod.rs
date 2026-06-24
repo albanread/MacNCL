@@ -6,6 +6,7 @@
 pub mod app;
 pub mod editor;
 pub mod repl;
+pub mod sexp;
 
 pub use app::{Ide, IdeAction};
 pub use editor::{Editor, Theme};

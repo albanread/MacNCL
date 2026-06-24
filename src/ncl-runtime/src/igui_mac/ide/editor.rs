@@ -12,6 +12,7 @@
 //!   next:      syntax tokens (highlighting), paredit sexp ops, diagnostics.
 
 use crate::igui_mac::events::vk;
+use crate::igui_mac::ide::sexp;
 use crate::igui_paint::{
     FontStretch, FontStyle, Point, Rect, Rgba, SurfaceCmd, TextAlign, TextRun, TextTrimming,
 };
@@ -727,6 +728,161 @@ impl Editor {
         }
     }
 
+    // ─── s-expression navigation + paredit ───────────────────────────
+
+    fn chars(&self) -> Vec<char> {
+        self.buffer.to_slice().iter().filter_map(|&c| char::from_u32(c)).collect()
+    }
+
+    /// Delete `[lo, hi)`, recording undo.
+    fn edit_delete(&mut self, lo: usize, hi: usize) {
+        if lo >= hi {
+            return;
+        }
+        let cursor_before = self.cursor;
+        let removed = self.splice_out(lo, hi);
+        self.push_undo(UndoOp::Deleted {
+            start: lo,
+            text: removed,
+            cursor_before,
+            cursor_after: lo,
+        });
+    }
+
+    /// Insert `text` at `at`, recording undo.
+    fn edit_insert(&mut self, at: usize, text: &[u32]) {
+        if text.is_empty() {
+            return;
+        }
+        let cursor_before = self.cursor;
+        let end = self.splice_in_cps(at, text);
+        self.push_undo(UndoOp::Inserted {
+            start: at,
+            text: text.to_vec(),
+            cursor_before,
+            cursor_after: end,
+        });
+    }
+
+    fn finish_structural_edit(&mut self, new_cursor: usize) {
+        self.cursor = new_cursor.min(self.buffer.len());
+        self.anchor = self.cursor;
+        self.pref_col = self.cursor_rc().1;
+        self.dirty = true;
+        self.redo.clear();
+        self.coalesce = None;
+    }
+
+    pub fn move_forward_sexp(&mut self, extend: bool) {
+        let cs = self.chars();
+        if let Some(end) = sexp::forward_sexp(&cs, self.cursor) {
+            self.set_cursor_offset(end, extend);
+            self.pref_col = self.cursor_rc().1;
+        }
+    }
+    pub fn move_backward_sexp(&mut self, extend: bool) {
+        let cs = self.chars();
+        if let Some(start) = sexp::backward_sexp(&cs, self.cursor) {
+            self.set_cursor_offset(start, extend);
+            self.pref_col = self.cursor_rc().1;
+        }
+    }
+
+    /// Pull the next sibling sexp into the enclosing form (paredit
+    /// slurp-forward): `(a| b) c` → `(a| b c)`.
+    pub fn slurp_forward(&mut self) {
+        let cs = self.chars();
+        let Some((_open, close)) = sexp::enclosing(&cs, self.cursor) else { return };
+        let Some((_s, nend)) = sexp::sexp_after(&cs, close + 1) else { return };
+        let bracket = cs[close] as u32;
+        // Move the close bracket from `close` to just after the slurped sexp.
+        self.edit_delete(close, close + 1);
+        self.edit_insert(nend - 1, &[bracket]);
+        self.finish_structural_edit(self.cursor);
+    }
+
+    /// Push the last element out of the enclosing form (paredit
+    /// barf-forward): `(a b| c)` → `(a b|) c`.
+    pub fn barf_forward(&mut self) {
+        let cs = self.chars();
+        let Some((open, close)) = sexp::enclosing(&cs, self.cursor) else { return };
+        let Some(last_start) = sexp::backward_sexp(&cs, close) else { return };
+        if last_start <= open + 1 {
+            return; // nothing left to barf
+        }
+        // Insert a close bracket before the last element (after trimming the
+        // whitespace that precedes it), then remove the original close.
+        let mut insert_pos = last_start;
+        while insert_pos > open + 1 && cs[insert_pos - 1].is_whitespace() {
+            insert_pos -= 1;
+        }
+        let bracket = cs[close] as u32;
+        self.edit_delete(close, close + 1);
+        self.edit_insert(insert_pos, &[bracket]);
+        let nc = self.cursor.min(insert_pos);
+        self.finish_structural_edit(nc);
+    }
+
+    /// Wrap the sexp at the cursor in a fresh `( … )` (paredit wrap-round).
+    pub fn wrap_round(&mut self) {
+        let cs = self.chars();
+        let Some((s, e)) = sexp::sexp_after(&cs, self.cursor) else { return };
+        self.edit_insert(e, &[')' as u32]); // higher offset first
+        self.edit_insert(s, &['(' as u32]);
+        self.finish_structural_edit(s + 1);
+    }
+
+    /// Remove the brackets of the enclosing form (paredit splice):
+    /// `(a (b| c) d)` → `(a b| c d)`.
+    pub fn splice(&mut self) {
+        let cs = self.chars();
+        let Some((open, close)) = sexp::enclosing(&cs, self.cursor) else { return };
+        self.edit_delete(close, close + 1); // higher offset first
+        self.edit_delete(open, open + 1);
+        let nc = if self.cursor > open { self.cursor - 1 } else { self.cursor };
+        self.finish_structural_edit(nc);
+    }
+
+    /// Replace the enclosing form with the sexp at the cursor (paredit
+    /// raise): `(a (b| c) d)` with point on `(b c)` → `(b| c)`.
+    pub fn raise(&mut self) {
+        let cs = self.chars();
+        let Some((s, e)) = sexp::sexp_after(&cs, self.cursor) else { return };
+        let Some((open, close)) = sexp::enclosing(&cs, self.cursor) else { return };
+        if s < open || e > close + 1 {
+            return;
+        }
+        let inner: Vec<u32> = cs[s..e].iter().map(|&c| c as u32).collect();
+        self.edit_delete(open, close + 1); // remove whole form
+        self.edit_insert(open, &inner);
+        self.finish_structural_edit(open);
+    }
+
+    /// The matching-bracket offset for a bracket adjacent to the cursor,
+    /// for paren-match highlighting. Returns `(here, there)` bracket
+    /// offsets, or `None`.
+    fn match_paren(&self) -> Option<(usize, usize)> {
+        let cs = self.chars();
+        let cur = self.cursor;
+        // Bracket just after the cursor.
+        if cur < cs.len() {
+            if matches!(cs[cur], '(' | '[') {
+                if let Some(c) = sexp::matching_close(&cs, cur) {
+                    return Some((cur, c));
+                }
+            }
+        }
+        // Bracket just before the cursor.
+        if cur > 0 {
+            if matches!(cs[cur - 1], ')' | ']') {
+                if let Some(o) = sexp::matching_open(&cs, cur - 1) {
+                    return Some((cur - 1, o));
+                }
+            }
+        }
+        None
+    }
+
     // ─── input ───────────────────────────────────────────────────────
 
     /// Handle a key-down. `vkey` is a Win32 VK code (see
@@ -735,9 +891,10 @@ impl Editor {
     pub fn on_key(&mut self, vkey: i64, mods: i64) -> bool {
         use crate::igui_events::modifier;
         let shift = mods & modifier::SHIFT != 0;
-        // Command (macOS) maps to the WIN bit; treat it as the editor's
-        // accelerator modifier, like Ctrl on Windows.
-        let cmd = mods & (modifier::WIN | modifier::CONTROL) != 0;
+        // macOS Command (WIN bit) is the editor accelerator (clipboard,
+        // undo); Control (CONTROL bit) drives paredit, as in Emacs/SLIME.
+        let cmd = mods & modifier::WIN != 0;
+        let ctrl = mods & modifier::CONTROL != 0;
 
         if cmd {
             match vkey {
@@ -747,6 +904,20 @@ impl Editor {
                 0x56 => self.paste(),              // Cmd-V
                 0x5A if shift => self.redo(),      // Cmd-Shift-Z
                 0x5A => self.undo(),               // Cmd-Z
+                _ => return false,
+            }
+            return true;
+        }
+
+        if ctrl {
+            match vkey {
+                vk::RIGHT if shift => self.slurp_forward(), // Ctrl-Shift-Right
+                vk::LEFT if shift => self.barf_forward(),   // Ctrl-Shift-Left
+                vk::RIGHT => self.move_forward_sexp(false), // Ctrl-Right
+                vk::LEFT => self.move_backward_sexp(false), // Ctrl-Left
+                0x57 => self.wrap_round(), // Ctrl-W
+                0x53 => self.splice(),     // Ctrl-S
+                0x52 => self.raise(),      // Ctrl-R
                 _ => return false,
             }
             return true;
@@ -936,6 +1107,24 @@ impl Editor {
             }
         }
 
+        // Paren-match highlight: outline both brackets when the cursor is
+        // beside one and its partner is visible.
+        if let Some((a, b)) = self.match_paren() {
+            for off in [a, b] {
+                let (r, c) = self.buffer.offset_to_line_col(off);
+                if r >= self.scroll_top && r < self.scroll_top + self.visible_rows {
+                    let py = area.y0 + (r - self.scroll_top) as f32 * cell_h;
+                    let px = text_x0 + c as f32 * cell_w;
+                    cmds.push(SurfaceCmd::StrokeRect {
+                        rect: Rect { x0: px, y0: py, x1: px + cell_w, y1: py + cell_h },
+                        corner_radius: 2.0,
+                        half_thickness: 0.75,
+                        color: t.c_paren,
+                    });
+                }
+            }
+        }
+
         // Caret.
         if cur_row >= self.scroll_top && cur_row < self.scroll_top + self.visible_rows {
             let cy = area.y0 + (cur_row - self.scroll_top) as f32 * cell_h;
@@ -1049,6 +1238,57 @@ mod tests {
         assert!(kinds.contains(&Tok::StringLit), "string");
         assert!(kinds.contains(&Tok::Char), "#\\a char literal");
         assert!(!in_str, "string closed on same line");
+    }
+
+    #[test]
+    fn paredit_slurp_forward() {
+        let mut e = Editor::with_text("(a b) c");
+        e.set_cursor(2); // inside (a b)
+        e.slurp_forward();
+        assert_eq!(e.text(), "(a b c)");
+    }
+
+    #[test]
+    fn paredit_barf_forward() {
+        let mut e = Editor::with_text("(a b c)");
+        e.set_cursor(2);
+        e.barf_forward();
+        assert_eq!(e.text(), "(a b) c");
+    }
+
+    #[test]
+    fn paredit_wrap_round() {
+        let mut e = Editor::with_text("foo bar");
+        e.set_cursor(0);
+        e.wrap_round();
+        assert_eq!(e.text(), "(foo) bar");
+        assert_eq!(e.cursor_rc(), (0, 1));
+    }
+
+    #[test]
+    fn paredit_splice() {
+        let mut e = Editor::with_text("(a (b c) d)");
+        e.set_cursor(4); // inside (b c)
+        e.splice();
+        assert_eq!(e.text(), "(a b c d)");
+    }
+
+    #[test]
+    fn paredit_raise() {
+        let mut e = Editor::with_text("(a (b c) d)");
+        e.set_cursor(3); // on the '(' of (b c)
+        e.raise();
+        assert_eq!(e.text(), "(b c)");
+    }
+
+    #[test]
+    fn forward_sexp_moves_cursor() {
+        let mut e = Editor::with_text("foo (bar baz) qux");
+        e.set_cursor(0);
+        e.move_forward_sexp(false);
+        assert_eq!(e.cursor_rc(), (0, 3)); // past foo
+        e.move_forward_sexp(false);
+        assert_eq!(e.cursor_rc(), (0, 13)); // past (bar baz)
     }
 
     #[test]
