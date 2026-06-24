@@ -122,20 +122,30 @@ impl Ide {
                 }
                 IdeAction::None
             }
-            IGuiEvent::Mouse { y, op, .. } => {
-                // Focus the pane under a left-click; route wheel to it.
-                if *op == crate::igui_events::mouse_op::LEFT_DOWN {
-                    self.focus = if (*y as f32) < self.editor_area().y1 {
+            IGuiEvent::Mouse { x, y, op, .. } => {
+                use crate::igui_events::mouse_op;
+                let (mx, my) = (*x as f32, *y as f32);
+                let down = *op == mouse_op::LEFT_DOWN;
+                let drag = *op == mouse_op::DRAG;
+                if down {
+                    self.focus = if my < self.editor_area().y1 {
                         Focus::Editor
                     } else {
                         Focus::Repl
                     };
                 }
-                if matches!(self.focus, Focus::Repl) {
-                    self.repl.handle_event(ev);
-                } else if *op == crate::igui_events::mouse_op::LEFT_DOWN {
-                    let area = self.editor_area();
-                    self.editor.on_click(0.0, *y as f32, area, false);
+                match self.focus {
+                    Focus::Repl => {
+                        self.repl.handle_event(ev);
+                    }
+                    Focus::Editor => {
+                        let area = self.editor_area();
+                        if down {
+                            self.editor.on_click(mx, my, area, false);
+                        } else if drag {
+                            self.editor.on_click(mx, my, area, true); // extend selection
+                        }
+                    }
                 }
                 IdeAction::None
             }

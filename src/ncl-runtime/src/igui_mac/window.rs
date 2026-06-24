@@ -164,6 +164,7 @@ where
         | NSEventMask::RightMouseDown
         | NSEventMask::RightMouseUp
         | NSEventMask::MouseMoved
+        | NSEventMask::LeftMouseDragged
         | NSEventMask::ScrollWheel;
     // Keep the monitor alive for the life of the app.
     let _monitor = unsafe { NSEvent::addLocalMonitorForEventsMatchingMask_handler(mask, &handler) };
@@ -243,6 +244,8 @@ fn dispatch_event(e: &NSEvent, view_height: f64) {
         mouse(ev::ns_mouse::right_up(), 1);
     } else if t == NSEventType::MouseMoved {
         mouse(ev::ns_mouse::moved(), 0);
+    } else if t == NSEventType::LeftMouseDragged {
+        mouse(crate::igui_events::mouse_op::DRAG, 0);
     } else if t == NSEventType::ScrollWheel {
         let p: NSPoint = e.locationInWindow();
         let y = ev::to_top_left_y(p.y, view_height);

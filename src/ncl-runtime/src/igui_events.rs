@@ -88,6 +88,9 @@ pub mod mouse_op {
     pub const MIDDLE_DOWN: i64 = 5;
     pub const MIDDLE_UP: i64 = 6;
     pub const WHEEL: i64 = 7;
+    /// Pointer moved with the left button held (drag). Windows synthesises
+    /// this from WM_MOUSEMOVE + button state; macOS from LeftMouseDragged.
+    pub const DRAG: i64 = 8;
 }
 
 /// Modifier-key bits as a packed `i64`. Matches Win32 GetKeyState bit
