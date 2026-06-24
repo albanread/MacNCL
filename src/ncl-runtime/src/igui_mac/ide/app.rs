@@ -78,9 +78,27 @@ impl Ide {
         self.repl.info(text);
     }
 
+    /// Load a file into the editor pane and focus it.
+    pub fn load_file(&mut self, path: &str) {
+        match self.editor.load_file(path) {
+            Ok(()) => {
+                self.focus = Focus::Editor;
+                self.repl.info(&format!("; loaded {path}"));
+            }
+            Err(e) => self.repl.error(&format!("open {path}: {e}")),
+        }
+    }
+
+    fn status_h(&self) -> f32 {
+        self.theme.cell_h.max(12.0) + 4.0
+    }
     fn editor_area(&self) -> Rect {
         let div = (self.height * self.split).round();
-        Rect { x0: 0.0, y0: 0.0, x1: self.width, y1: div - 1.0 }
+        Rect { x0: 0.0, y0: 0.0, x1: self.width, y1: div - self.status_h() }
+    }
+    fn status_area(&self) -> Rect {
+        let div = (self.height * self.split).round();
+        Rect { x0: 0.0, y0: div - self.status_h(), x1: self.width, y1: div - 1.0 }
     }
     fn repl_area(&self) -> Rect {
         let div = (self.height * self.split).round();
@@ -149,6 +167,17 @@ impl Ide {
                     }
                     return IdeAction::None;
                 }
+                0x53 => {
+                    // Cmd-S → save the editor's backing file.
+                    match self.editor.save() {
+                        Ok(Some(p)) => self.repl.info(&format!("; saved {p}")),
+                        Ok(None) => self
+                            .repl
+                            .info("; no file — launch with `ncl --windows <file.lisp>` to set one"),
+                        Err(e) => self.repl.error(&format!("save failed: {e}")),
+                    }
+                    return IdeAction::None;
+                }
                 _ => {}
             }
         }
@@ -200,6 +229,30 @@ impl Ide {
             }
             cmds.push(c);
         }
+        // Status bar (editor file • L:C • modified).
+        let sa = self.status_area();
+        cmds.push(SurfaceCmd::FillRect {
+            rect: sa,
+            corner_radius: 0.0,
+            color: Rgba { r: 0.16, g: 0.18, b: 0.22, a: 1.0 },
+        });
+        cmds.push(SurfaceCmd::DrawTextRun {
+            run: crate::igui_paint::TextRun {
+                text: self.editor.status(),
+                origin: crate::igui_paint::Point { x: sa.x0 + 8.0, y: sa.y0 + 2.0 },
+                family: self.theme.family.clone(),
+                size: self.theme.size - 1.0,
+                weight: 400,
+                style: crate::igui_paint::FontStyle::Normal,
+                stretch: crate::igui_paint::FontStretch::Normal,
+                locale: "en-us".into(),
+                color: self.theme.gutter_fg,
+                max_width: None,
+                alignment: crate::igui_paint::TextAlign::Leading,
+                trimming: crate::igui_paint::TextTrimming::None,
+            },
+        });
+
         // REPL pane.
         for c in self.repl.render(ra) {
             if matches!(c, SurfaceCmd::Clear { .. }) {

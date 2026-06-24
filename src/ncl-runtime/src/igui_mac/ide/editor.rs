@@ -255,6 +255,8 @@ pub struct Editor {
     coalesce: Option<Coalesce>,
     clipboard: Vec<u32>,
     theme: Theme,
+    /// Backing file, if the buffer was loaded from or saved to one.
+    file_path: Option<String>,
     /// Whether to draw a line-number gutter.
     pub show_gutter: bool,
     /// Rows that fit in the viewport, updated by `render`.
@@ -281,6 +283,7 @@ impl Editor {
             coalesce: None,
             clipboard: Vec::new(),
             theme: Theme::default(),
+            file_path: None,
             show_gutter: true,
             visible_rows: 1,
         }
@@ -341,6 +344,40 @@ impl Editor {
     }
     pub fn line_count(&self) -> usize {
         self.buffer.line_count()
+    }
+    pub fn file_path(&self) -> Option<&str> {
+        self.file_path.as_deref()
+    }
+
+    /// Load `path` into the buffer, replacing its contents.
+    pub fn load_file(&mut self, path: &str) -> std::io::Result<()> {
+        let s = std::fs::read_to_string(path)?;
+        self.set_text(&s);
+        self.set_cursor(0);
+        self.file_path = Some(path.to_string());
+        self.dirty = false;
+        Ok(())
+    }
+
+    /// Save to the backing file. `Ok(Some(path))` on success, `Ok(None)`
+    /// if there is no backing file yet.
+    pub fn save(&mut self) -> std::io::Result<Option<String>> {
+        match self.file_path.clone() {
+            Some(p) => {
+                std::fs::write(&p, self.text())?;
+                self.dirty = false;
+                Ok(Some(p))
+            }
+            None => Ok(None),
+        }
+    }
+
+    /// A status string: `path • L:C • [modified]`.
+    pub fn status(&self) -> String {
+        let (r, c) = self.cursor_rc();
+        let name = self.file_path.as_deref().unwrap_or("«unsaved»");
+        let dirty = if self.dirty { " • modified" } else { "" };
+        format!("{name}  {}:{}{dirty}", r + 1, c + 1)
     }
 
     // ─── selection / cursor helpers ──────────────────────────────────

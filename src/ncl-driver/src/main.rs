@@ -125,7 +125,7 @@ fn main() -> ExitCode {
 /// evaluating submitted forms through the compiler and presenting the
 /// rendered transcript back to the window.
 #[cfg(all(target_os = "macos", feature = "mac-gui"))]
-fn run_mac_gui(_raw_args: Vec<String>) -> ExitCode {
+fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
     use ncl_runtime::igui_events::{self, IGuiEvent};
     use ncl_runtime::igui_mac::ide::{Ide, IdeAction, Theme};
     use ncl_runtime::igui_mac::render::CgCanvas;
@@ -177,7 +177,14 @@ fn run_mac_gui(_raw_args: Vec<String>) -> ExitCode {
             }
         };
         ide.info(&format!("NCL {VERSION} on Apple Silicon — ready."));
-        ide.info("Cmd-R run buffer · Cmd-Return eval form · Cmd-E editor · Cmd-L REPL");
+        ide.info("Cmd-R run buffer · Cmd-Return eval form · Cmd-S save · Cmd-E/L focus");
+        // Load a `.lisp`/`.lsp`/`.cl` file argument into the editor.
+        if let Some(path) = raw_args.iter().find(|a| {
+            !a.starts_with('-')
+                && (a.ends_with(".lisp") || a.ends_with(".lsp") || a.ends_with(".cl"))
+        }) {
+            ide.load_file(path);
+        }
         window::present(ide.render(area));
 
         // Self-test: inject a canned form so eval can be verified without a
