@@ -5,6 +5,8 @@ edition = "2024"
 
 [features]
 default = ["gc-page-heap"]
+# mac-gui: install the macOS iGui Lisp shims (open-child/with-batch/…).
+mac-gui = ["ncl-runtime/mac-gui"]
 gc-page-heap = [
     "ncl-runtime/gc-page-heap",
     "ncl-reader/gc-page-heap",

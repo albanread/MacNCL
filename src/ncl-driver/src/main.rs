@@ -205,12 +205,48 @@ fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
             ]);
             ide.info("; opened graphics window (id 2)");
         }
-        // Load every `.lisp`/`.lsp`/`.cl` file argument into its own tab.
-        for path in raw_args.iter().filter(|a| {
-            !a.starts_with('-')
-                && (a.ends_with(".lisp") || a.ends_with(".lsp") || a.ends_with(".cl"))
-        }) {
-            ide.load_file(path);
+        // Process args: --eval/--load run app code (so graphics apps open
+        // their own side windows); a bare `file.lisp` opens in an editor tab.
+        let mut it = raw_args.iter();
+        while let Some(a) = it.next() {
+            let run_src = |ide: &mut Ide, session: &mut ncl_compiler::Session, src: &str| {
+                ncl_runtime::output::begin_capture();
+                let r = session.eval(src);
+                if let Some(p) = ncl_runtime::output::end_capture() {
+                    let p = p.trim_end_matches('\n');
+                    if !p.is_empty() {
+                        ide.output(p);
+                    }
+                }
+                match r {
+                    Ok(s) => ide.output(&s),
+                    Err(e) => ide.error(&format!("{e:?}")),
+                }
+            };
+            match a.as_str() {
+                "--eval" | "-e" => {
+                    if let Some(src) = it.next() {
+                        run_src(&mut ide, &mut session, src);
+                    }
+                }
+                "--load" | "-l" => {
+                    if let Some(path) = it.next() {
+                        match std::fs::read_to_string(path) {
+                            Ok(src) => {
+                                ide.info(&format!("; load {path}"));
+                                run_src(&mut ide, &mut session, &src);
+                            }
+                            Err(e) => ide.error(&format!("read {path}: {e}")),
+                        }
+                    }
+                }
+                s if !s.starts_with('-')
+                    && (s.ends_with(".lisp") || s.ends_with(".lsp") || s.ends_with(".cl")) =>
+                {
+                    ide.load_file(s);
+                }
+                _ => {}
+            }
         }
         window::present_main(ide.render(area));
 

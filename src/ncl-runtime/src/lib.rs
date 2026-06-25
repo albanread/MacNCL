@@ -115,6 +115,17 @@ pub use igui::lisp_shims::{
     canvas_open_shim, canvas_present_shim,
     mdi_arrange_icons_shim, mdi_cascade_shim, mdi_tile_shim,
 };
+/// macOS iGui shims (subset for graphics apps), mirroring the Windows names.
+#[cfg(all(target_os = "macos", feature = "mac-gui"))]
+pub use igui_mac::shims::{
+    begin_batch_shim, clear_event_filter_shim, close_child_shim, discard_stashed_events_shim,
+    emit_clear_shim, emit_draw_arc_shim, emit_draw_line_shim, emit_draw_text_shim,
+    emit_draw_text_styled_shim, emit_fill_circle_shim, emit_fill_oval_shim, emit_fill_rect_shim,
+    emit_stroke_circle_shim, emit_stroke_oval_shim, emit_stroke_rect_shim, filter_on_window_shim,
+    igui_quit_shim, igui_start_shim, igui_wait_shim, measure_text_shim, next_event_for_shim,
+    next_event_shim, open_child_shim, open_child_sized_shim, set_redraw_rate_shim, set_title_shim,
+    submit_batch_shim, unfilter_window_shim,
+};
 pub use audio::{
     audio_abc_play_shim, audio_abc_stop_shim, audio_beep_shim, audio_blip_shim,
     audio_click_shim, audio_coin_shim, audio_hit_shim, audio_jump_shim,

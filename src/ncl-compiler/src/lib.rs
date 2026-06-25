@@ -1251,6 +1251,8 @@ fn install_native_functions(
     // come in a follow-up commit.
     #[cfg(windows)]
     install_igui(coord, mutator);
+    #[cfg(all(target_os = "macos", feature = "mac-gui"))]
+    install_igui_mac(coord, mutator);
 
     // NewAudio shims — synthesis presets, simple playback, ABC.
     // The shims themselves are cross-platform (non-Windows builds
@@ -1825,6 +1827,42 @@ extern "C-unwind" fn substring_shim(
         .collect();
     let m = unsafe { &mut *mutator };
     ncl_runtime::gc_string::alloc_string_in_young(m, &chars).raw()
+}
+
+/// macOS iGui shim install (subset for graphics apps). Mirrors the Windows
+/// `install_igui` names so the Lisp Library (with-batch, event-loop-for, …)
+/// works unchanged.
+#[cfg(all(target_os = "macos", feature = "mac-gui"))]
+fn install_igui_mac(coord: &Arc<GcCoordinator>, mutator: &mut MutatorState) {
+    use ncl_runtime as rt;
+    install_native(coord, mutator, "IGUI-START", rt::igui_start_shim, 0);
+    install_native(coord, mutator, "IGUI-WAIT", rt::igui_wait_shim, 0);
+    install_native(coord, mutator, "IGUI-QUIT", rt::igui_quit_shim, 0);
+    install_native(coord, mutator, "OPEN-CHILD", rt::open_child_shim, 1);
+    install_native(coord, mutator, "OPEN-CHILD-SIZED", rt::open_child_sized_shim, 3);
+    install_native(coord, mutator, "CLOSE-CHILD", rt::close_child_shim, 1);
+    install_native(coord, mutator, "SET-TITLE", rt::set_title_shim, 2);
+    install_native(coord, mutator, "NEXT-EVENT", rt::next_event_shim, 1);
+    install_native(coord, mutator, "NEXT-EVENT-FOR", rt::next_event_for_shim, 2);
+    install_native(coord, mutator, "FILTER-ON-WINDOW", rt::filter_on_window_shim, 1);
+    install_native(coord, mutator, "UNFILTER-WINDOW", rt::unfilter_window_shim, 1);
+    install_native(coord, mutator, "CLEAR-EVENT-FILTER", rt::clear_event_filter_shim, 0);
+    install_native(coord, mutator, "DISCARD-STASHED-EVENTS", rt::discard_stashed_events_shim, 0);
+    install_native(coord, mutator, "SET-REDRAW-RATE", rt::set_redraw_rate_shim, 2);
+    install_native(coord, mutator, "%BEGIN-BATCH", rt::begin_batch_shim, 1);
+    install_native(coord, mutator, "%SUBMIT-BATCH", rt::submit_batch_shim, 0);
+    install_native(coord, mutator, "%EMIT-CLEAR", rt::emit_clear_shim, 1);
+    install_native(coord, mutator, "%EMIT-FILL-RECT", rt::emit_fill_rect_shim, 5);
+    install_native(coord, mutator, "%EMIT-STROKE-RECT", rt::emit_stroke_rect_shim, 6);
+    install_native(coord, mutator, "%EMIT-DRAW-LINE", rt::emit_draw_line_shim, 6);
+    install_native(coord, mutator, "%EMIT-DRAW-TEXT", rt::emit_draw_text_shim, 5);
+    install_native(coord, mutator, "%EMIT-DRAW-TEXT-STYLED", rt::emit_draw_text_styled_shim, 6);
+    install_native(coord, mutator, "%MEASURE-TEXT", rt::measure_text_shim, 4);
+    install_native(coord, mutator, "%EMIT-FILL-OVAL", rt::emit_fill_oval_shim, 5);
+    install_native(coord, mutator, "%EMIT-STROKE-OVAL", rt::emit_stroke_oval_shim, 6);
+    install_native(coord, mutator, "%EMIT-FILL-CIRCLE", rt::emit_fill_circle_shim, 4);
+    install_native(coord, mutator, "%EMIT-STROKE-CIRCLE", rt::emit_stroke_circle_shim, 5);
+    install_native(coord, mutator, "%EMIT-DRAW-ARC", rt::emit_draw_arc_shim, 7);
 }
 
 #[cfg(windows)]

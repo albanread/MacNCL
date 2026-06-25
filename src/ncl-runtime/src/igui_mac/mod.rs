@@ -19,6 +19,10 @@
 pub mod events;
 pub mod ide;
 pub mod render;
+/// Native Lisp shims that let Lisp drive the Cocoa side windows (open-child,
+/// the batch/`%emit-*` drawing primitives, next-event). Opt-in (`mac-gui`).
+#[cfg(feature = "mac-gui")]
+pub mod shims;
 /// Cocoa windowing + AppKit event loop. Opt-in (`mac-gui`) because it
 /// pulls the objc2 AppKit bindings and needs a GUI session to run; the
 /// renderer and event translation below it are always built and tested.
