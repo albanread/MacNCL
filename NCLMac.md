@@ -35,6 +35,23 @@ The `mac-gui` feature pulls the AppKit bindings (objc2). The **default build is 
 headless** and never links AppKit — the renderer and event translation are always
 compiled and unit-tested without a display.
 
+### Graphics apps
+
+Unmodified NCL graphics demos run as **side windows** — each `(open-child …)` is its own
+`NSWindow`, drawing via `(with-batch …)` (`SurfaceCmd` batches) and receiving events
+through the shared mailbox:
+
+```sh
+cargo run -p ncl-driver --features mac-gui -- --windows \
+  --load Lisp/demos/draw-square.lisp --eval "(run-draw-square)"
+
+cargo run -p ncl-driver --features mac-gui -- --windows \
+  --load Lisp/demos/othello-gui.lisp --eval "(run-othello-gui)"
+```
+
+The same Lisp that drives these on Windows drives them here. `--eval`/`--load` run app
+code; a bare `file.lisp` argument opens in an editor tab instead.
+
 ---
 
 ## The IDE

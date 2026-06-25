@@ -105,6 +105,9 @@ struct WinEntry {
     view: Retained<NSImageView>,
     w: f64,
     h: f64,
+    /// `NSWindow.windowNumber` — a stable per-window integer used to route
+    /// `NSEvent`s to the right child (robust integer compare).
+    num: isize,
 }
 
 struct WindowManager {
@@ -141,7 +144,8 @@ impl WindowManager {
         let view = NSImageView::new(mtm);
         window.setContentView(Some(&view));
         window.makeKeyAndOrderFront(None);
-        self.wins.insert(id, WinEntry { window, view, w, h });
+        let num = window.windowNumber();
+        self.wins.insert(id, WinEntry { window, view, w, h, num });
         // Show any batch already presented for this id.
         dirty().lock().unwrap_or_else(|e| e.into_inner()).insert(id);
     }
@@ -158,15 +162,20 @@ impl WindowManager {
         }
     }
 
-    /// id of the window an event belongs to (by `NSEvent.window`), or
-    /// MAIN_ID as a fallback.
-    fn id_for_window(&self, win: Option<Retained<NSWindow>>) -> i64 {
-        if let Some(w) = win {
-            let wp = Retained::as_ptr(&w);
-            for (id, e) in &self.wins {
-                if Retained::as_ptr(&e.window) == wp {
-                    return *id;
-                }
+    /// id of the window an event belongs to, by `NSEvent.windowNumber`.
+    /// Falls back to the key window, then MAIN_ID.
+    fn id_for_event(&self, e: &NSEvent) -> i64 {
+        let num = e.windowNumber();
+        for (id, entry) in &self.wins {
+            if entry.num == num {
+                return *id;
+            }
+        }
+        // Fallback: the key (focused) window — for a click that's the one
+        // just clicked.
+        for (id, entry) in &self.wins {
+            if entry.window.isKeyWindow() {
+                return *id;
             }
         }
         MAIN_ID
@@ -264,7 +273,7 @@ where
         let e = unsafe { event.as_ref() };
         let (id, h) = {
             let m = mgr_e.borrow();
-            let id = m.id_for_window(e.window(mtm));
+            let id = m.id_for_event(e);
             (id, m.height_of(id))
         };
         dispatch_event(e, id, h);
@@ -320,6 +329,9 @@ fn dispatch_event(e: &NSEvent, child_id: i64, view_height: f64) {
     let mouse = |op: i64, button: i64| {
         let p: NSPoint = e.locationInWindow();
         let y = ev::to_top_left_y(p.y, view_height);
+        if std::env::var_os("NCL_GUI_DEBUG").is_some() {
+            eprintln!("[mac-evt] mouse child={child_id} op={op} x={} y={}", p.x as i64, y as i64);
+        }
         igui_events::push(ev::mouse_event(child_id, p.x, y, op, button, flags, 0, 0, 0));
     };
 
