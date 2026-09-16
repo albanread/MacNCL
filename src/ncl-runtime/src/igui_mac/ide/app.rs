@@ -5,8 +5,12 @@
 //! with the source to evaluate; the driver runs it through the compiler
 //! `Session` and calls `output`/`error`. The result always lands in the
 //! REPL transcript so there is one log.
+//!
+//! Menus live in the **system menu bar** (`igui_mac::menu`); picks arrive
+//! here as `IGuiEvent::Menu` events and route through `run_menu_cmd`, the
+//! same dispatcher the keyboard shortcuts use.
 
-use crate::igui_events::{modifier, IGuiEvent};
+use crate::igui_events::{menu_cmd, modifier, IGuiEvent};
 use crate::igui_mac::events::vk;
 use crate::igui_mac::ide::editor::{Editor, Theme};
 use crate::igui_mac::ide::repl::Repl;
@@ -28,19 +32,24 @@ pub enum IdeAction {
     Eval(String),
 }
 
-// ─── Menu bar ───────────────────────────────────────────────────────────
-//
-// An in-window, custom-drawn menu bar (the whole IDE is SurfaceCmd-drawn, so
-// a native NSMenu would mean fragile objc target/action plumbing for no gain).
-// Each command also has a keyboard shortcut handled in `on_key`; the menu
-// exists so those features are *discoverable* — the items show their keys.
-
-/// A menu command. Both the menu and a keyboard shortcut route here.
+/// A menu command. The system menu bar's dispatcher, the key-equivalent
+/// swallow in the event monitor, and `NCL_GUI_MENU` all arrive as
+/// `IGuiEvent::Menu`; this is their shared endpoint.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum MenuCmd {
-    NewTab,
+    New,
     CloseTab,
     Save,
+    Settings,
+    Undo,
+    Redo,
+    Cut,
+    Copy,
+    Paste,
+    SelectAll,
+    Find,
+    FindNext,
+    Comment,
     RunBuffer,
     EvalForm,
     ClearRepl,
@@ -49,45 +58,53 @@ enum MenuCmd {
     Help,
 }
 
-struct MItem {
-    label: &'static str,
-    key: &'static str,
-    cmd: MenuCmd,
-}
-struct MMenu {
-    title: &'static str,
-    items: &'static [MItem],
-}
+impl MenuCmd {
+    /// Map a `menu_cmd::*` opcode to its command. Unknown ids no-op.
+    fn from_opcode(op: i64) -> Option<Self> {
+        Some(match op {
+            menu_cmd::NEW => Self::New,
+            menu_cmd::CLOSE_TAB => Self::CloseTab,
+            menu_cmd::SAVE => Self::Save,
+            menu_cmd::SETTINGS => Self::Settings,
+            menu_cmd::UNDO => Self::Undo,
+            menu_cmd::REDO => Self::Redo,
+            menu_cmd::CUT => Self::Cut,
+            menu_cmd::COPY => Self::Copy,
+            menu_cmd::PASTE => Self::Paste,
+            menu_cmd::SELECT_ALL => Self::SelectAll,
+            menu_cmd::FIND => Self::Find,
+            menu_cmd::FIND_NEXT => Self::FindNext,
+            menu_cmd::COMMENT => Self::Comment,
+            menu_cmd::RUN_BUFFER => Self::RunBuffer,
+            menu_cmd::EVAL_FORM => Self::EvalForm,
+            menu_cmd::CLEAR_REPL => Self::ClearRepl,
+            menu_cmd::FOCUS_EDITOR => Self::FocusEditor,
+            menu_cmd::FOCUS_REPL => Self::FocusRepl,
+            menu_cmd::HELP => Self::Help,
+            _ => return None,
+        })
+    }
 
-const MENUS: &[MMenu] = &[
-    MMenu {
-        title: "File",
-        items: &[
-            MItem { label: "New Tab", key: "⌘T", cmd: MenuCmd::NewTab },
-            MItem { label: "Close Tab", key: "⌘W", cmd: MenuCmd::CloseTab },
-            MItem { label: "Save", key: "⌘S", cmd: MenuCmd::Save },
-        ],
-    },
-    MMenu {
-        title: "Eval",
-        items: &[
-            MItem { label: "Run Buffer", key: "⌘R", cmd: MenuCmd::RunBuffer },
-            MItem { label: "Eval Form at Point", key: "⌘↩", cmd: MenuCmd::EvalForm },
-            MItem { label: "Clear REPL", key: "⌘K", cmd: MenuCmd::ClearRepl },
-        ],
-    },
-    MMenu {
-        title: "View",
-        items: &[
-            MItem { label: "Focus Editor", key: "⌘E", cmd: MenuCmd::FocusEditor },
-            MItem { label: "Focus REPL", key: "⌘L", cmd: MenuCmd::FocusRepl },
-        ],
-    },
-    MMenu {
-        title: "Help",
-        items: &[MItem { label: "Keyboard Shortcuts", key: "", cmd: MenuCmd::Help }],
-    },
-];
+    /// The editor/REPL accelerator equivalent for editing commands: menu
+    /// picks must behave exactly like pressing the key. Returned as a
+    /// (vkey, mods) pair fed to `on_key`, which routes by focus.
+    fn accelerator(self) -> Option<(i64, i64)> {
+        let w = modifier::WIN;
+        let s = modifier::SHIFT;
+        Some(match self {
+            Self::Undo => (0x5A, w),          // Cmd-Z
+            Self::Redo => (0x5A, w | s),      // Cmd-Shift-Z
+            Self::Cut => (0x58, w),           // Cmd-X
+            Self::Copy => (0x43, w),          // Cmd-C
+            Self::Paste => (0x56, w),         // Cmd-V
+            Self::SelectAll => (0x41, w),     // Cmd-A
+            Self::Find => (0x46, w),          // Cmd-F
+            Self::FindNext => (0x47, w),      // Cmd-G
+            Self::Comment => (vk::OEM_2, w),  // Cmd-/
+            _ => return None,
+        })
+    }
+}
 
 pub struct Ide {
     buffers: Vec<Editor>,
@@ -102,8 +119,6 @@ pub struct Ide {
     split: f32,
     /// True while the user is dragging the editor/REPL divider.
     dragging_split: bool,
-    /// Which top-level menu's dropdown is open, if any.
-    open_menu: Option<usize>,
     width: f32,
     height: f32,
 }
@@ -138,7 +153,6 @@ impl Ide {
             theme,
             split: 0.62,
             dragging_split: false,
-            open_menu: None,
             width: 900.0,
             height: 620.0,
         }
@@ -222,20 +236,17 @@ impl Ide {
     fn status_h(&self) -> f32 {
         self.cell_h.max(12.0) + 4.0
     }
-    /// Height of the top menu bar.
-    fn menu_h(&self) -> f32 {
-        self.cell_h.max(14.0) + 6.0
-    }
-    /// Top of the editor stack: below the menu bar and the tab bar.
+    /// Top of the editor stack: below the tab bar (menus live in the
+    /// system menu bar, not in-window).
     fn header_h(&self) -> f32 {
-        self.menu_h() + self.tab_h()
+        self.tab_h()
     }
     fn editor_area(&self) -> Rect {
         let div = (self.height * self.split).round();
         Rect { x0: 0.0, y0: self.header_h(), x1: self.width, y1: div - self.status_h() }
     }
     fn tab_area(&self) -> Rect {
-        Rect { x0: 0.0, y0: self.menu_h(), x1: self.width, y1: self.header_h() }
+        Rect { x0: 0.0, y0: 0.0, x1: self.width, y1: self.header_h() }
     }
     fn status_area(&self) -> Rect {
         let div = (self.height * self.split).round();
@@ -249,83 +260,19 @@ impl Ide {
         (self.width / self.buffers.len() as f32).min(200.0).max(60.0)
     }
 
-    // ─── menu geometry + hit-testing ──────────────────────────────────
-
-    /// Left/right x of each top-level menu title in the bar.
-    fn menu_title_x(&self) -> Vec<(f32, f32)> {
-        let mut out = Vec::with_capacity(MENUS.len());
-        let mut x = 8.0;
-        for m in MENUS {
-            let w = m.title.chars().count() as f32 * self.cell_w + 16.0;
-            out.push((x, x + w));
-            x += w;
-        }
-        out
-    }
-
-    fn dropdown_item_h(&self) -> f32 {
-        self.cell_h.max(14.0) + 6.0
-    }
-
-    fn dropdown_rect(&self, mi: usize) -> Rect {
-        let (x0, _) = self.menu_title_x()[mi];
-        let mut chars = 0usize;
-        for it in MENUS[mi].items {
-            chars = chars.max(it.label.chars().count() + it.key.chars().count());
-        }
-        let w = (chars as f32 * self.cell_w + 48.0).max(180.0);
-        let h = MENUS[mi].items.len() as f32 * self.dropdown_item_h() + 4.0;
-        Rect { x0, y0: self.menu_h(), x1: x0 + w, y1: self.menu_h() + h }
-    }
-
-    /// Index of the menu title under (mx,my), if the point is in the menu bar.
-    fn menu_title_at(&self, mx: f32, my: f32) -> Option<usize> {
-        if my >= self.menu_h() {
-            return None;
-        }
-        self.menu_title_x()
-            .into_iter()
-            .position(|(x0, x1)| mx >= x0 && mx < x1)
-    }
-
-    /// The command of the dropdown item under (mx,my) for the open menu `mi`.
-    fn dropdown_cmd_at(&self, mi: usize, mx: f32, my: f32) -> Option<MenuCmd> {
-        let r = self.dropdown_rect(mi);
-        if mx < r.x0 || mx > r.x1 || my < r.y0 || my > r.y1 {
-            return None;
-        }
-        let idx = ((my - r.y0 - 2.0) / self.dropdown_item_h()) as usize;
-        MENUS[mi].items.get(idx).map(|it| it.cmd)
-    }
-
-    /// Handle a left-down while the menu system is involved. Returns
-    /// `Some(action)` if the click was consumed (item picked, menu opened, or
-    /// an open menu dismissed), `None` to let normal pane handling proceed.
-    fn menu_mouse_down(&mut self, mx: f32, my: f32) -> Option<IdeAction> {
-        if let Some(mi) = self.open_menu {
-            if let Some(cmd) = self.dropdown_cmd_at(mi, mx, my) {
-                self.open_menu = None;
-                return Some(self.run_menu_cmd(cmd));
-            }
-            if let Some(ti) = self.menu_title_at(mx, my) {
-                // Click another title → switch; same title → close.
-                self.open_menu = if ti == mi { None } else { Some(ti) };
-                return Some(IdeAction::None);
-            }
-            // Click anywhere else dismisses the menu and is consumed.
-            self.open_menu = None;
-            return Some(IdeAction::None);
-        }
-        if let Some(ti) = self.menu_title_at(mx, my) {
-            self.open_menu = Some(ti);
-            return Some(IdeAction::None);
-        }
-        None
+    /// Whether the menu's Save item should be enabled (active buffer dirty).
+    pub fn can_save(&self) -> bool {
+        self.ed().is_dirty()
     }
 
     fn run_menu_cmd(&mut self, cmd: MenuCmd) -> IdeAction {
+        // Editing commands behave exactly like their keyboard equivalent:
+        // run the accelerator through on_key, which routes by focus.
+        if let Some((vkey, mods)) = cmd.accelerator() {
+            return self.on_key(vkey, mods);
+        }
         match cmd {
-            MenuCmd::NewTab => {
+            MenuCmd::New => {
                 self.new_buffer();
                 IdeAction::None
             }
@@ -335,6 +282,10 @@ impl Ide {
             }
             MenuCmd::Save => {
                 self.save_buffer();
+                IdeAction::None
+            }
+            MenuCmd::Settings => {
+                self.repl.info("; no settings yet — watch this space");
                 IdeAction::None
             }
             MenuCmd::RunBuffer => self.run_buffer(),
@@ -358,6 +309,16 @@ impl Ide {
                 self.show_shortcuts();
                 IdeAction::None
             }
+            // Handled by the accelerator fast path above.
+            MenuCmd::Undo
+            | MenuCmd::Redo
+            | MenuCmd::Cut
+            | MenuCmd::Copy
+            | MenuCmd::Paste
+            | MenuCmd::SelectAll
+            | MenuCmd::Find
+            | MenuCmd::FindNext
+            | MenuCmd::Comment => unreachable!("editing commands have accelerators"),
         }
     }
 
@@ -420,6 +381,15 @@ impl Ide {
     /// Returns an action for the driver (an eval request) or `None`.
     pub fn handle_event(&mut self, ev: &IGuiEvent) -> IdeAction {
         match ev {
+            // System-menu-bar picks (mouse clicks on items, swallowed key
+            // equivalents, NCL_GUI_MENU injection) — same dispatcher the
+            // keyboard shortcuts use.
+            IGuiEvent::Menu { menu_id, item_id } if *menu_id == menu_cmd::IDE => {
+                match MenuCmd::from_opcode(*item_id) {
+                    Some(cmd) => self.run_menu_cmd(cmd),
+                    None => IdeAction::None,
+                }
+            }
             IGuiEvent::Key { vkey, mods, down, .. } if *down => self.on_key(*vkey, *mods),
             IGuiEvent::Char { codepoint, .. } => {
                 match self.focus {
@@ -438,15 +408,6 @@ impl Ide {
                 let down = *op == mouse_op::LEFT_DOWN;
                 let drag = *op == mouse_op::DRAG;
                 let up = *op == mouse_op::LEFT_UP;
-
-                // ── menu bar / dropdown ──
-                // Takes priority: an open dropdown can overlay the editor, so
-                // its clicks must be caught before pane routing.
-                if down {
-                    if let Some(act) = self.menu_mouse_down(mx, my) {
-                        return act;
-                    }
-                }
 
                 // ── splitter drag ──
                 // Grab the editor/REPL divider on a down within SPLIT_GRAB px,
@@ -469,7 +430,7 @@ impl Ide {
                 }
 
                 // Tab-bar click switches buffers.
-                if down && my >= self.menu_h() && my < self.header_h() {
+                if down && my < self.header_h() {
                     let i = (mx / self.tab_width()) as usize;
                     self.switch_to(i);
                     return IdeAction::None;
@@ -607,25 +568,7 @@ impl Ide {
 
         let mut cmds = vec![SurfaceCmd::Clear { color: self.theme.bg }];
 
-        // ── menu bar ──
-        let mh = self.menu_h();
-        cmds.push(SurfaceCmd::FillRect {
-            rect: Rect { x0: 0.0, y0: 0.0, x1: self.width, y1: mh },
-            corner_radius: 0.0,
-            color: Rgba { r: 0.08, g: 0.09, b: 0.12, a: 1.0 },
-        });
-        for (i, (m, (x0, x1))) in MENUS.iter().zip(self.menu_title_x()).enumerate() {
-            if self.open_menu == Some(i) {
-                cmds.push(SurfaceCmd::FillRect {
-                    rect: Rect { x0, y0: 1.0, x1, y1: mh - 1.0 },
-                    corner_radius: 3.0,
-                    color: Rgba { r: 0.20, g: 0.30, b: 0.42, a: 1.0 },
-                });
-            }
-            cmds.push(self.run(m.title.into(), x0 + 8.0, 3.0, self.theme.fg));
-        }
-
-        // ── tab bar ──
+        // ── tab bar (menus live in the system menu bar) ──
         let ta = self.tab_area();
         cmds.push(SurfaceCmd::FillRect {
             rect: ta,
@@ -708,31 +651,7 @@ impl Ide {
             corner_radius: 2.0,
             color: focus_color(),
         });
-
-        // ── open dropdown (drawn last, over everything) ──
-        if let Some(mi) = self.open_menu {
-            let r = self.dropdown_rect(mi);
-            cmds.push(SurfaceCmd::FillRect {
-                rect: r,
-                corner_radius: 4.0,
-                color: Rgba { r: 0.14, g: 0.15, b: 0.19, a: 1.0 },
-            });
-            cmds.push(SurfaceCmd::StrokeRect {
-                rect: r,
-                corner_radius: 4.0,
-                half_thickness: 0.5,
-                color: Rgba { r: 0.30, g: 0.34, b: 0.42, a: 1.0 },
-            });
-            let ih = self.dropdown_item_h();
-            for (j, it) in MENUS[mi].items.iter().enumerate() {
-                let y = r.y0 + 2.0 + j as f32 * ih;
-                cmds.push(self.run(it.label.into(), r.x0 + 10.0, y + 3.0, self.theme.fg));
-                if !it.key.is_empty() {
-                    let kx = r.x1 - it.key.chars().count() as f32 * self.cell_w - 12.0;
-                    cmds.push(self.run(it.key.into(), kx, y + 3.0, self.theme.gutter_fg));
-                }
-            }
-        }
+        let _ = div_y;
         cmds
     }
 }
@@ -778,54 +697,68 @@ mod tests {
         assert!(!ide.dragging_split);
     }
 
-    #[test]
-    fn menu_opens_and_runs_a_command() {
-        use crate::igui_events::mouse_op;
-        let mut ide = Ide::new(Theme::default());
-        ide.set_metrics(8.0, 16.0, 12.0);
-        ide.render(Rect { x0: 0.0, y0: 0.0, x1: 900.0, y1: 620.0 });
-        // Click the "File" title to open its dropdown.
-        let (x0, _) = ide.menu_title_x()[0];
-        ide.handle_event(&mouse(mouse_op::LEFT_DOWN, x0 + 4.0, 4.0));
-        assert_eq!(ide.open_menu, Some(0));
-        // Click "New Tab" (first item) → opens a buffer and closes the menu.
-        let r = ide.dropdown_rect(0);
-        let item_y = r.y0 + 2.0 + 0.5 * ide.dropdown_item_h();
-        let before = ide.buffers.len();
-        ide.handle_event(&mouse(mouse_op::LEFT_DOWN, r.x0 + 10.0, item_y));
-        assert_eq!(ide.open_menu, None);
-        assert_eq!(ide.buffers.len(), before + 1);
+    /// A system-menu-bar pick, as it arrives from the dispatcher / the
+    /// key-equivalent swallow / NCL_GUI_MENU.
+    fn menu(item_id: i64) -> IGuiEvent {
+        IGuiEvent::Menu { menu_id: menu_cmd::IDE, item_id }
     }
 
+    /// Sprint 1 AC: a Menu Run-Buffer pick behaves exactly like the ⌘R
+    /// shortcut — same `IdeAction::Eval`, same source.
     #[test]
-    fn menu_run_buffer_requests_an_eval() {
-        use crate::igui_events::mouse_op;
+    fn menu_run_buffer_matches_the_shortcut() {
         let mut ide = Ide::new(Theme::default());
-        ide.set_metrics(8.0, 16.0, 12.0);
-        ide.render(Rect { x0: 0.0, y0: 0.0, x1: 900.0, y1: 620.0 });
-        // Open "Eval" (index 1), click "Run Buffer" (item 0).
-        let (x0, _) = ide.menu_title_x()[1];
-        ide.handle_event(&mouse(mouse_op::LEFT_DOWN, x0 + 4.0, 4.0));
-        let r = ide.dropdown_rect(1);
-        let item_y = r.y0 + 2.0 + 0.5 * ide.dropdown_item_h();
-        match ide.handle_event(&mouse(mouse_op::LEFT_DOWN, r.x0 + 10.0, item_y)) {
-            IdeAction::Eval(src) => assert!(src.contains("defun square")),
-            _ => panic!("Run Buffer menu item should request an eval"),
+        ide.focus = Focus::Editor;
+        let via_key = ide.on_key(0x52, modifier::WIN); // Cmd-R
+        let via_menu = ide.handle_event(&menu(menu_cmd::RUN_BUFFER));
+        match (via_key, via_menu) {
+            (IdeAction::Eval(k), IdeAction::Eval(m)) => assert_eq!(k, m),
+            _ => panic!("both paths should request an eval"),
         }
     }
 
+    /// Sprint 1 AC: every opcode the menu registry can emit routes to a
+    /// known command and produces no action (or an eval) — never a panic.
     #[test]
-    fn clicking_outside_dismisses_the_menu() {
-        use crate::igui_events::mouse_op;
+    fn every_menu_opcode_routes() {
+        for op in [
+            menu_cmd::NEW, menu_cmd::CLOSE_TAB, menu_cmd::SAVE, menu_cmd::SETTINGS,
+            menu_cmd::UNDO, menu_cmd::REDO, menu_cmd::CUT, menu_cmd::COPY,
+            menu_cmd::PASTE, menu_cmd::SELECT_ALL, menu_cmd::FIND, menu_cmd::FIND_NEXT,
+            menu_cmd::COMMENT, menu_cmd::RUN_BUFFER, menu_cmd::EVAL_FORM,
+            menu_cmd::CLEAR_REPL, menu_cmd::FOCUS_EDITOR, menu_cmd::FOCUS_REPL,
+            menu_cmd::HELP,
+        ] {
+            let mut ide = Ide::new(Theme::default());
+            let _ = ide.handle_event(&menu(op));
+        }
+        // Unknown ids no-op instead of misrouting.
         let mut ide = Ide::new(Theme::default());
-        ide.set_metrics(8.0, 16.0, 12.0);
-        ide.render(Rect { x0: 0.0, y0: 0.0, x1: 900.0, y1: 620.0 });
-        let (x0, _) = ide.menu_title_x()[0];
-        ide.handle_event(&mouse(mouse_op::LEFT_DOWN, x0 + 4.0, 4.0));
-        assert_eq!(ide.open_menu, Some(0));
-        // A click down in the editor area dismisses it (and is consumed).
-        ide.handle_event(&mouse(mouse_op::LEFT_DOWN, 450.0, 400.0));
-        assert_eq!(ide.open_menu, None);
+        assert!(matches!(ide.handle_event(&menu(9999)), IdeAction::None));
+        // Foreign menus (not menu_cmd::IDE) are ignored.
+        let foreign = IGuiEvent::Menu { menu_id: 42, item_id: menu_cmd::SAVE };
+        assert!(matches!(ide.handle_event(&foreign), IdeAction::None));
+    }
+
+    #[test]
+    fn menu_new_opens_a_buffer() {
+        let mut ide = Ide::new(Theme::default());
+        let before = ide.buffers.len();
+        ide.handle_event(&menu(menu_cmd::NEW));
+        assert_eq!(ide.buffers.len(), before + 1);
+    }
+
+    /// Menu Edit commands run the focused pane's accelerator: inserting a
+    /// char and then picking Undo must leave the buffer as it started.
+    #[test]
+    fn menu_undo_runs_the_editor_accelerator() {
+        let mut ide = Ide::new(Theme::default());
+        ide.focus = Focus::Editor;
+        let before = ide.ed().text();
+        ide.ed_mut().on_char('Z' as u32);
+        assert_ne!(ide.ed().text(), before, "sanity: the char was inserted");
+        ide.handle_event(&menu(menu_cmd::UNDO));
+        assert_eq!(ide.ed().text(), before, "menu Undo should undo the insert");
     }
 
     #[test]

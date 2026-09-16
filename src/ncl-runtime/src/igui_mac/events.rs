@@ -56,6 +56,23 @@ pub mod kvk {
     pub const F11: u16 = 0x67;
     pub const F12: u16 = 0x6F;
     pub const SLASH: u16 = 0x2C; // kVK_ANSI_Slash
+    // Letters needed for menu key-equivalent matching (see igui_mac::menu).
+    pub const A: u16 = 0x00;
+    pub const C: u16 = 0x08;
+    pub const COMMA: u16 = 0x2B;
+    pub const E: u16 = 0x0E;
+    pub const F: u16 = 0x03;
+    pub const G: u16 = 0x05;
+    pub const K: u16 = 0x28;
+    pub const L: u16 = 0x25;
+    pub const N: u16 = 0x2D;
+    pub const R: u16 = 0x0F;
+    pub const S: u16 = 0x01;
+    pub const T: u16 = 0x11;
+    pub const V: u16 = 0x09;
+    pub const W: u16 = 0x0D;
+    pub const X: u16 = 0x07;
+    pub const Z: u16 = 0x06;
 }
 
 /// Win32 virtual-key codes we map onto (the values the Lisp side expects).

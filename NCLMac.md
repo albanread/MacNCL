@@ -65,6 +65,11 @@ code; a bare `file.lisp` argument opens in an editor tab instead.
 `ncl --windows` opens a native window split into a **Lisp editor** (top) and a **REPL**
 (bottom), backed by the real compiler `Session`.
 
+Commands live in the **system menu bar** (MacNCL / File / Edit / Eval / View / Window /
+Help) with their ⌘-glyph shortcuts shown; picking an item flows through the same event
+mailbox as the keyboard. ⌘Q/⌘H/⌘M behave as standard Mac app controls. New: **⌘N** (File ▸
+New) opens a buffer, in addition to ⌘T.
+
 ### Editor pane — a rich Lisp editor
 
 - **Syntax highlighting** — special forms, `:keywords`, numbers, strings (multi-line

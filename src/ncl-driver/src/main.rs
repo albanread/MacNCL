@@ -344,6 +344,20 @@ fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
             });
         }
 
+        // Menu-pick injection (NCL_GUI_MENU=<name>): verify a system-menu
+        // command end-to-end without a mouse. Flows through the real
+        // mailbox + Menu routing, like a click on the menu item.
+        if let Some(name) = std::env::var_os("NCL_GUI_MENU") {
+            let name = name.to_string_lossy().into_owned();
+            match ncl_runtime::igui_mac::menu::opcode_for_name(&name) {
+                Some(op) => igui_events::push(IGuiEvent::Menu {
+                    menu_id: ncl_runtime::igui_events::menu_cmd::IDE,
+                    item_id: op,
+                }),
+                None => ide.error(&format!("NCL_GUI_MENU: unknown command {name:?}")),
+            }
+        }
+
         // ── Central cooperative event loop ───────────────────────────────
         //
         // ONE loop, on this single worker (language) thread, serves every
@@ -414,6 +428,10 @@ fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
                     }
                 }
                 if !is_move {
+                    // Keep the menu's Save enablement in step with the
+                    // active buffer's dirty flag (read by validateMenuItem:
+                    // when the menu opens).
+                    ncl_runtime::igui_mac::menu::set_save_enabled(ide.can_save());
                     window::present_main(ide.render(area));
                 }
             }

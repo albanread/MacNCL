@@ -33,8 +33,9 @@ use objc2_app_kit::{
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSTimer};
 
-use crate::igui_events;
+use crate::igui_events::{self, menu_cmd, modifier, IGuiEvent};
 use crate::igui_mac::events as ev;
+use crate::igui_mac::menu;
 use crate::igui_mac::render::CgCanvas;
 use crate::igui_paint::SurfaceCmd;
 
@@ -462,6 +463,10 @@ where
     let app = NSApplication::sharedApplication(mtm);
     app.setActivationPolicy(NSApplicationActivationPolicy::Regular);
 
+    // The system menu bar replaces the old in-window menu: real ⌘-glyph
+    // items whose picks arrive as `IGuiEvent::Menu` (see `igui_mac::menu`).
+    menu::install(&app, mtm);
+
     let manager = Rc::new(RefCell::new(WindowManager::new(mtm)));
     if let Some((title, w, h)) = &main_window {
         manager.borrow_mut().open(MAIN_ID, *w, *h, title);
@@ -473,6 +478,21 @@ where
     let had_window = Rc::new(Cell::new(false));
 
     // Repaint + command-drain timer (~60 Hz) on the main thread.
+    // Also polls the `NCL_GUI_QUIT_AFTER_MS` flag so lifecycle tests can
+    // quit the app cleanly without a human pressing ⌘Q.
+    static QUIT_REQUESTED: std::sync::atomic::AtomicBool =
+        std::sync::atomic::AtomicBool::new(false);
+    if let Some(ms) = std::env::var_os("NCL_GUI_QUIT_AFTER_MS") {
+        if let Ok(ms) = ms.to_string_lossy().parse::<u64>() {
+            std::thread::Builder::new()
+                .name("ncl-gui-quit-timer".into())
+                .spawn(move || {
+                    std::thread::sleep(Duration::from_millis(ms));
+                    QUIT_REQUESTED.store(true, Ordering::Relaxed);
+                })
+                .ok();
+        }
+    }
     let mgr_t = Rc::clone(&manager);
     let app_t = app.clone();
     let had_t = Rc::clone(&had_window);
@@ -515,6 +535,10 @@ where
                 unsafe { app_t.terminate(None) };
             }
         }
+        if QUIT_REQUESTED.swap(false, Ordering::Relaxed) {
+            // Test hook: NCL_GUI_QUIT_AFTER_MS elapsed — quit like ⌘Q.
+            unsafe { app_t.terminate(None) };
+        }
         mgr_t.borrow().repaint_dirty();
     });
     let _timer = unsafe {
@@ -525,6 +549,22 @@ where
     let mgr_e = Rc::clone(&manager);
     let handler = RcBlock::new(move |event: NonNull<NSEvent>| -> *mut NSEvent {
         let e = unsafe { event.as_ref() };
+        // Menu-owned key equivalents (⌘S, ⌘N, ⇧⌘Z, …): post the menu
+        // command and swallow the event. Swallowing is what keeps the
+        // dispatch single — otherwise AppKit's own menu matching would
+        // fire the item AND our key path would see the event. Pure-AppKit
+        // combos (⌘Q, ⌘H, ⌘M) are not registered and flow on untouched.
+        if e.r#type() == NSEventType::KeyDown {
+            let mods = ev::mods_from_flags(e.modifierFlags().0 as u64)
+                & (modifier::SHIFT | modifier::CONTROL | modifier::ALT | modifier::WIN);
+            if let Some(op) = menu::key_equivalent_cmd(e.keyCode() as u16, mods) {
+                igui_events::push(IGuiEvent::Menu {
+                    menu_id: menu_cmd::IDE,
+                    item_id: op,
+                });
+                return std::ptr::null_mut();
+            }
+        }
         let (id, h) = {
             let m = mgr_e.borrow();
             let id = m.id_for_event(e);
@@ -572,7 +612,10 @@ fn dispatch_event(e: &NSEvent, child_id: i64, view_height: f64) {
         igui_events::push(ev::key_event(child_id, keycode, ch, flags, e.isARepeat(), down, 0));
         if down {
             if let Some(c) = ch {
-                if !c.is_control() {
+                // Command combos are menu accelerators, not text: real Mac
+                // apps never insert a character for them. (⌘Q/⌘H etc. are
+                // not in our registry and still reach AppKit's menu.)
+                if !c.is_control() && flags & ev::nsflags::COMMAND == 0 {
                     igui_events::push(ev::char_event(child_id, c as u32, flags, 0));
                 }
             }

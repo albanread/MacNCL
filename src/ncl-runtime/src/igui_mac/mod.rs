@@ -18,6 +18,9 @@
 
 pub mod events;
 pub mod ide;
+/// The system menu bar (registry + NSMenu install). The registry half is
+/// pure data and always built/tested; the AppKit half is `mac-gui`.
+pub mod menu;
 pub mod render;
 /// Native Lisp shims that let Lisp drive the Cocoa side windows (open-child,
 /// the batch/`%emit-*` drawing primitives, next-event). Opt-in (`mac-gui`).

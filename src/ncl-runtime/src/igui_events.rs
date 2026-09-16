@@ -104,6 +104,36 @@ pub mod modifier {
     pub const CAPS: i64 = 1 << 4;
 }
 
+/// `IGuiEvent::Menu` identifiers for the macOS system menu bar
+/// (`igui_mac::menu`). `menu_id` namespaces the issuer so any Lisp-side
+/// global `:MENU` handlers can tell IDE commands from other sources;
+/// `item_id` is one of these opcodes. Pure data, no platform deps, so the
+/// registry tests run headless.
+pub mod menu_cmd {
+    /// `menu_id` for commands issued by the IDE's system menu bar.
+    pub const IDE: i64 = 1;
+
+    pub const NEW: i64 = 1;
+    pub const CLOSE_TAB: i64 = 2;
+    pub const SAVE: i64 = 3;
+    pub const SETTINGS: i64 = 4;
+    pub const UNDO: i64 = 5;
+    pub const REDO: i64 = 6;
+    pub const CUT: i64 = 7;
+    pub const COPY: i64 = 8;
+    pub const PASTE: i64 = 9;
+    pub const SELECT_ALL: i64 = 10;
+    pub const FIND: i64 = 11;
+    pub const FIND_NEXT: i64 = 12;
+    pub const COMMENT: i64 = 13;
+    pub const RUN_BUFFER: i64 = 14;
+    pub const EVAL_FORM: i64 = 15;
+    pub const CLEAR_REPL: i64 = 16;
+    pub const FOCUS_EDITOR: i64 = 17;
+    pub const FOCUS_REPL: i64 = 18;
+    pub const HELP: i64 = 19;
+}
+
 // ── Event enum ──────────────────────────────────────────────────────────────
 
 /// All input and lifecycle events flow as one of these variants.
