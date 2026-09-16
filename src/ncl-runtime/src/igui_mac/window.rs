@@ -37,6 +37,7 @@ use crate::igui_events::{self, menu_cmd, modifier, IGuiEvent};
 use crate::igui_mac::events as ev;
 use crate::igui_mac::menu;
 use crate::igui_mac::render::CgCanvas;
+use crate::igui_mac::theme;
 use crate::igui_paint::SurfaceCmd;
 
 /// The IDE / main window's id.
@@ -320,6 +321,12 @@ impl WindowManager {
         self.wins.get(&MAIN_ID).map(|e| (e.w, e.h))
     }
 
+    /// Whether the IDE window currently exists and is the key window
+    /// (None if the window isn't open yet).
+    fn main_is_key(&self) -> Option<bool> {
+        self.wins.get(&MAIN_ID).map(|e| e.window.isKeyWindow())
+    }
+
     /// Detect window resizes and react. Our NSEvent monitor only sees
     /// key/mouse, so a window-content resize never reaches the mailbox on its
     /// own; we poll the content-view size each main-thread tick instead. When
@@ -502,6 +509,9 @@ where
     // The system menu bar replaces the old in-window menu: real ⌘-glyph
     // items whose picks arrive as `IGuiEvent::Menu` (see `igui_mac::menu`).
     menu::install(&app, mtm);
+    // Resolve the semantic theme once up front (appearance + accent) so
+    // the worker's very first batch already uses system colors.
+    theme::refresh(&app);
 
     let manager = Rc::new(RefCell::new(WindowManager::new(mtm)));
     if let Some((title, w, h)) = &main_window {
@@ -535,7 +545,35 @@ where
     // Last progress value painted, so the loading bar only re-renders on a real
     // advance (not 60×/s). u32::MAX forces the first frame.
     let last_done = Rc::new(Cell::new(u32::MAX));
+    // Last-seen key state of the IDE window, so a change (the user focused
+    // another app/window) reaches the worker as a Focus event.
+    let last_main_key = Rc::new(Cell::new(None::<bool>));
+    // Handle to the Lisp worker, so the quit path can join it before
+    // terminating. Exiting while the worker is mid-JIT-compile segfaults
+    // on Apple Silicon (the W^X write-protect toggle is per-thread), so
+    // ⌘Q/`NCL_GUI_QUIT_AFTER_MS` must let the worker reach a quiet point
+    // first. It stops when its central loop sees a `FrameClose`.
+    let worker_handle: Rc<RefCell<Option<std::thread::JoinHandle<()>>>> =
+        Rc::new(RefCell::new(None));
+    let worker_h_t = Rc::clone(&worker_handle);
     let tick = RcBlock::new(move |_t: NonNull<NSTimer>| {
+        // System theme: re-resolve on appearance/accent change and wake the
+        // worker with a ThemeChange so it re-templates and repaints.
+        if theme::refresh(&app_t) {
+            igui_events::push(IGuiEvent::ThemeChange);
+        }
+
+        // IDE key-window state → Focus events (dimming while inactive).
+        {
+            let key = mgr_t.borrow().main_is_key();
+            if let Some(k) = key {
+                if last_main_key.get() != Some(k) {
+                    last_main_key.set(Some(k));
+                    igui_events::push(IGuiEvent::Focus { child_id: MAIN_ID, gained: k });
+                }
+            }
+        }
+
         // Drain commands (creates/closes windows), then repaint dirty ones.
         mgr_t.borrow_mut().drain_commands();
 
@@ -572,7 +610,12 @@ where
             }
         }
         if QUIT_REQUESTED.swap(false, Ordering::Relaxed) {
-            // Test hook: NCL_GUI_QUIT_AFTER_MS elapsed — quit like ⌘Q.
+            // Graceful quit (NCL_GUI_QUIT_AFTER_MS): stop the worker, wait
+            // for it to leave the JIT, then terminate. See `worker_handle`.
+            igui_events::push(IGuiEvent::FrameClose);
+            if let Some(h) = worker_h_t.borrow_mut().take() {
+                let _ = h.join();
+            }
             unsafe { app_t.terminate(None) };
         }
         mgr_t.borrow().repaint_dirty();
@@ -622,11 +665,12 @@ where
 
     app.activate();
 
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("ncl-lisp-worker".into())
         .stack_size(8 * 1024 * 1024)
         .spawn(worker)
         .map_err(|e| format!("failed to spawn Lisp worker: {e}"))?;
+    *worker_handle.borrow_mut() = Some(spawned);
 
     app.run();
     Ok(())
