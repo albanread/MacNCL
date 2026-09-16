@@ -40,6 +40,37 @@ use crate::igui_mac::render::CgCanvas;
 use crate::igui_mac::theme;
 use crate::igui_paint::SurfaceCmd;
 
+/// ── System font resolution (AppKit side) ────────────────────────────────
+///
+/// SF Mono (and the system font's named weights) aren't reachable by
+/// CoreText name lookup, so this resolver goes through `NSFont` and hands
+/// the toll-free-bridged `CTFont` pointer to the renderer. Falls back to
+/// `None` (→ render.rs's own Menlo/Helvetica chain) for unknown families.
+#[cfg(feature = "mac-gui")]
+fn system_font_resolver(
+    family: &str,
+    size: f32,
+) -> Option<core_text::font::CTFont> {
+    use core_foundation::base::TCFType;
+    use objc2::rc::Retained;
+    use objc2_app_kit::{NSFont, NSFontWeightRegular};
+
+    let ns: Retained<NSFont> = match family {
+        "__system" => NSFont::systemFontOfSize(size as f64),
+        "__system-bold" => NSFont::boldSystemFontOfSize(size as f64),
+        "__mono" => {
+            // SAFETY: reading the extern weight constant (a plain CGFloat).
+            let w = unsafe { NSFontWeightRegular };
+            NSFont::monospacedSystemFontOfSize_weight(size as f64, w)
+        }
+        _ => return None,
+    };
+    // NSFont and CTFont are the same object; `wrap_under_get_rule`
+    // retains it for the core-text wrapper.
+    let ptr = Retained::as_ptr(&ns) as core_text::font::CTFontRef;
+    unsafe { Some(core_text::font::CTFont::wrap_under_get_rule(ptr)) }
+}
+
 /// The IDE / main window's id.
 pub const MAIN_ID: i64 = 1;
 
@@ -512,6 +543,10 @@ where
     // Resolve the semantic theme once up front (appearance + accent) so
     // the worker's very first batch already uses system colors.
     theme::refresh(&app);
+    // Give the renderer access to the private system faces (SF Mono has no
+    // CoreText name — see `render::register_font_resolver`). NSFont and
+    // CTFont are toll-free bridged: retain + hand the pointer across.
+    crate::igui_mac::render::register_font_resolver(system_font_resolver);
 
     let manager = Rc::new(RefCell::new(WindowManager::new(mtm)));
     if let Some((title, w, h)) = &main_window {

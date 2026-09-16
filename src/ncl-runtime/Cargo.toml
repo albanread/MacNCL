@@ -59,7 +59,7 @@ core-text = "22.0.0"
 # Cocoa windowing (optional; enabled by the `mac-gui` feature).
 objc2 = { version = "0.6", optional = true }
 objc2-foundation = { version = "0.3", optional = true, features = ["NSGeometry", "NSThread", "NSString", "NSTimer", "NSDate"] }
-objc2-app-kit = { version = "0.3", optional = true, features = ["NSApplication", "NSWindow", "NSView", "NSEvent", "NSResponder", "NSGraphics", "NSRunningApplication", "NSImage", "NSImageView", "NSControl", "NSMenu", "NSMenuItem", "NSColor", "NSColorSpace", "NSAppearance"] }
+objc2-app-kit = { version = "0.3", optional = true, features = ["NSApplication", "NSWindow", "NSView", "NSEvent", "NSResponder", "NSGraphics", "NSRunningApplication", "NSImage", "NSImageView", "NSControl", "NSMenu", "NSMenuItem", "NSColor", "NSColorSpace", "NSAppearance", "NSFont", "NSFontDescriptor"] }
 objc2-core-graphics = { version = "0.3", optional = true }
 # Provides the ForeignType::as_ptr() used to bridge the servo CGImage to
 # objc2's &CGImage. Version tracks core-graphics's foreign-types dep.

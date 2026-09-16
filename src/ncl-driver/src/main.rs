@@ -248,6 +248,10 @@ fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
         ncl_runtime::load_progress::finish(); // hide the loading bar; IDE takes over
 
         ide.info(&format!("NCL {VERSION} on Apple Silicon — ready."));
+        ide.info(&format!(
+            "; font: {}",
+            ncl_runtime::igui_mac::render::resolved_font_name(&theme.family, theme.size)
+        ));
         ide.info("Cmd-R run buffer · Cmd-Return eval form · Cmd-S save · Cmd-E/L focus");
 
         // Demo: open a graphics side-window and draw a scene (proves the
@@ -447,21 +451,30 @@ fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
             }
 
             if to_ide {
-                if let IdeAction::Eval(src) = ide.handle_event(&ev) {
-                    // Capture the program's printed output so
-                    // `(format t …)` / print show up in the transcript.
-                    ncl_runtime::output::begin_capture();
-                    let result = session.eval(&src);
-                    if let Some(printed) = ncl_runtime::output::end_capture() {
-                        let printed = printed.trim_end_matches('\n');
-                        if !printed.is_empty() {
-                            ide.output(printed);
+                match ide.handle_event(&ev) {
+                    IdeAction::Eval(src) => {
+                        // Capture the program's printed output so
+                        // `(format t …)` / print show up in the transcript.
+                        ncl_runtime::output::begin_capture();
+                        let result = session.eval(&src);
+                        if let Some(printed) = ncl_runtime::output::end_capture() {
+                            let printed = printed.trim_end_matches('\n');
+                            if !printed.is_empty() {
+                                ide.output(printed);
+                            }
+                        }
+                        match result {
+                            Ok(s) => ide.output(&s),
+                            Err(e) => ide.error(&format!("{e:?}")),
                         }
                     }
-                    match result {
-                        Ok(s) => ide.output(&s),
-                        Err(e) => ide.error(&format!("{e:?}")),
+                    // ⌘+/⌘−: re-measure the code font's cell metrics so the
+                    // next render lays out at the new size.
+                    IdeAction::Remeasure => {
+                        let (cw, ch, asc) = metrics(ide.font_family(), ide.font_size());
+                        ide.set_metrics(cw, ch, asc);
                     }
+                    IdeAction::None => {}
                 }
                 if !is_move {
                     // Keep the menu's Save enablement in step with the

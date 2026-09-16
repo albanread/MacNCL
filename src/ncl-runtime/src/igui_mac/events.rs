@@ -56,6 +56,8 @@ pub mod kvk {
     pub const F11: u16 = 0x67;
     pub const F12: u16 = 0x6F;
     pub const SLASH: u16 = 0x2C; // kVK_ANSI_Slash
+    pub const EQUALS: u16 = 0x18; // kVK_ANSI_Equals (+/=)
+    pub const MINUS: u16 = 0x1B; // kVK_ANSI_Minus
     // Letters needed for menu key-equivalent matching (see igui_mac::menu).
     pub const A: u16 = 0x00;
     pub const C: u16 = 0x08;

@@ -116,6 +116,10 @@ pub static MENUS: &[MenuSpec] = &[
                 key: Some(KeyEq { kvk: kvk::E, mods: modifier::WIN }) },
             ItemSpec { name: "focus-repl", label: "Focus REPL", opcode: menu_cmd::FOCUS_REPL,
                 key: Some(KeyEq { kvk: kvk::L, mods: modifier::WIN }) },
+            ItemSpec { name: "font-up", label: "Bigger", opcode: menu_cmd::FONT_UP,
+                key: Some(KeyEq { kvk: kvk::EQUALS, mods: modifier::WIN }) },
+            ItemSpec { name: "font-down", label: "Smaller", opcode: menu_cmd::FONT_DOWN,
+                key: Some(KeyEq { kvk: kvk::MINUS, mods: modifier::WIN }) },
         ],
     },
     MenuSpec {
@@ -312,6 +316,7 @@ fn ns_key_equivalent(k: &KeyEq) -> (String, objc2_app_kit::NSEventModifierFlags)
             kvk::R => "r", kvk::S => "s", kvk::T => "t", kvk::V => "v",
             kvk::W => "w", kvk::X => "x", kvk::Z => "z",
             kvk::SLASH => "/", kvk::COMMA => ",", kvk::RETURN => "\r",
+            kvk::EQUALS => "=", kvk::MINUS => "-",
             _ => "",
         }
         .to_string()
@@ -380,7 +385,7 @@ mod tests {
             menu_cmd::PASTE, menu_cmd::SELECT_ALL, menu_cmd::FIND, menu_cmd::FIND_NEXT,
             menu_cmd::COMMENT, menu_cmd::RUN_BUFFER, menu_cmd::EVAL_FORM,
             menu_cmd::CLEAR_REPL, menu_cmd::FOCUS_EDITOR, menu_cmd::FOCUS_REPL,
-            menu_cmd::HELP,
+            menu_cmd::HELP, menu_cmd::FONT_UP, menu_cmd::FONT_DOWN,
         ]
     }
 

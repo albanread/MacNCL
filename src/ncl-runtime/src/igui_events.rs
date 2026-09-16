@@ -132,6 +132,8 @@ pub mod menu_cmd {
     pub const FOCUS_EDITOR: i64 = 17;
     pub const FOCUS_REPL: i64 = 18;
     pub const HELP: i64 = 19;
+    pub const FONT_UP: i64 = 20;
+    pub const FONT_DOWN: i64 = 21;
 }
 
 // ── Event enum ──────────────────────────────────────────────────────────────

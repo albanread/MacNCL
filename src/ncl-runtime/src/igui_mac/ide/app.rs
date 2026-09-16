@@ -26,11 +26,15 @@ enum Focus {
 }
 
 /// What the driver should do after an event.
+#[derive(Debug)]
 pub enum IdeAction {
     None,
     /// Evaluate this source through the compiler, then call
     /// `output`/`error` with the result.
     Eval(String),
+    /// The code font size changed — re-measure cell metrics via Core Text
+    /// and call `set_metrics` before the next render.
+    Remeasure,
 }
 
 /// A menu command. The system menu bar's dispatcher, the key-equivalent
@@ -56,6 +60,8 @@ enum MenuCmd {
     ClearRepl,
     FocusEditor,
     FocusRepl,
+    FontUp,
+    FontDown,
     Help,
 }
 
@@ -81,6 +87,8 @@ impl MenuCmd {
             menu_cmd::CLEAR_REPL => Self::ClearRepl,
             menu_cmd::FOCUS_EDITOR => Self::FocusEditor,
             menu_cmd::FOCUS_REPL => Self::FocusRepl,
+            menu_cmd::FONT_UP => Self::FontUp,
+            menu_cmd::FONT_DOWN => Self::FontDown,
             menu_cmd::HELP => Self::Help,
             _ => return None,
         })
@@ -118,6 +126,9 @@ pub struct Ide {
     /// Whether the IDE window is the key window — inactive windows dim
     /// their labels and hide the caret, like native Mac apps.
     window_active: bool,
+    /// Code font size in points (⌘+/⌘−, clamped 12–20). Survives
+    /// re-theming (appearance changes keep the user's zoom).
+    font_size: f32,
     cell_w: f32,
     cell_h: f32,
     ascent: f32,
@@ -166,6 +177,7 @@ impl Ide {
             theme,
             sys,
             window_active: true,
+            font_size: 15.0,
             split: 0.62,
             dragging_split: false,
             width: 900.0,
@@ -174,9 +186,11 @@ impl Ide {
     }
 
     /// Re-theme from a new snapshot (appearance/accent change). Carries the
-    /// measured cell metrics across — only colours move.
+    /// measured cell metrics and the user's font size across — only
+    /// colours move.
     pub fn set_theme(&mut self, sys: SystemTheme) {
         self.theme = sys.to_editor_theme();
+        self.theme.size = self.font_size;
         self.theme.cell_w = self.cell_w;
         self.theme.cell_h = self.cell_h;
         self.theme.ascent = self.ascent;
@@ -187,6 +201,32 @@ impl Ide {
             b.set_metrics(self.cell_w, self.cell_h, self.ascent);
         }
         self.repl.set_theme(t);
+    }
+
+    /// Step the code font size (⌘+/⌘−), clamped to 12–20pt. Returns
+    /// `Remeasure` when it moved so the driver re-measures cell metrics.
+    fn step_font_size(&mut self, d: f32) -> IdeAction {
+        let new = (self.font_size + d).clamp(12.0, 20.0);
+        if (new - self.font_size).abs() < 0.01 {
+            return IdeAction::None;
+        }
+        self.font_size = new;
+        self.theme.size = new;
+        let t = self.theme.clone();
+        for b in &mut self.buffers {
+            b.set_theme(t.clone());
+            b.set_metrics(self.cell_w, self.cell_h, self.ascent);
+        }
+        self.repl.set_theme(t);
+        IdeAction::Remeasure
+    }
+
+    /// The code font family/size the driver should (re-)measure.
+    pub fn font_family(&self) -> &str {
+        &self.theme.family
+    }
+    pub fn font_size(&self) -> f32 {
+        self.theme.size
     }
 
     /// Set whether the IDE window is the key window. Inactive windows dim
@@ -375,6 +415,8 @@ impl Ide {
                 self.focus = Focus::Repl;
                 IdeAction::None
             }
+            MenuCmd::FontUp => self.step_font_size(1.0),
+            MenuCmd::FontDown => self.step_font_size(-1.0),
             MenuCmd::Help => {
                 self.show_shortcuts();
                 IdeAction::None
@@ -627,13 +669,16 @@ impl Ide {
         }
     }
 
-    fn run(&self, text: String, x: f32, y: f32, color: Rgba) -> SurfaceCmd {
+    /// A chrome text run: SF Pro (`__system`) at an explicit size — 13pt
+    /// for tab labels, 11pt for the status bar (the design's type scale;
+    /// ⌘+/⌘− zoom code, not chrome).
+    fn run(&self, text: String, x: f32, y: f32, color: Rgba, size: f32) -> SurfaceCmd {
         SurfaceCmd::DrawTextRun {
             run: TextRun {
                 text,
                 origin: Point { x, y },
-                family: self.theme.family.clone(),
-                size: self.theme.size - 1.0,
+                family: "__system".into(),
+                size,
                 weight: 400,
                 style: FontStyle::Normal,
                 stretch: FontStretch::Normal,
@@ -678,7 +723,7 @@ impl Ide {
             } else {
                 self.tier(s.text_secondary, s.text_tertiary)
             };
-            cmds.push(self.run(Self::tab_label(b), x0 + 8.0, ta.y0 + 4.0, col));
+            cmds.push(self.run(Self::tab_label(b), x0 + 8.0, ta.y0 + 4.0, col, 13.0));
         }
         // `+` button after the last tab — ⌘N/⌘T discoverability.
         let pr = self.plus_rect();
@@ -693,6 +738,7 @@ impl Ide {
                 pr.x0 + 9.0,
                 ta.y0 + 4.0,
                 self.tier(s.text_secondary, s.text_tertiary),
+                13.0,
             ),
         );
 
@@ -713,9 +759,13 @@ impl Ide {
             color: s.status_bg,
         });
         let status = self.ed().status();
-        cmds.push(
-            self.run(status, sa.x0 + 8.0, sa.y0 + 2.0, self.tier(s.text_secondary, s.text_tertiary)),
-        );
+        cmds.push(self.run(
+            status,
+            sa.x0 + 8.0,
+            sa.y0 + 2.0,
+            self.tier(s.text_secondary, s.text_tertiary),
+            11.0,
+        ));
 
         // ── REPL pane ──
         for c in self.repl.render(ra) {
@@ -832,7 +882,7 @@ mod tests {
             menu_cmd::PASTE, menu_cmd::SELECT_ALL, menu_cmd::FIND, menu_cmd::FIND_NEXT,
             menu_cmd::COMMENT, menu_cmd::RUN_BUFFER, menu_cmd::EVAL_FORM,
             menu_cmd::CLEAR_REPL, menu_cmd::FOCUS_EDITOR, menu_cmd::FOCUS_REPL,
-            menu_cmd::HELP,
+            menu_cmd::HELP, menu_cmd::FONT_UP, menu_cmd::FONT_DOWN,
         ] {
             let mut ide = Ide::new(fixed_dark());
             let _ = ide.handle_event(&menu(op));
@@ -1136,5 +1186,75 @@ mod tests {
             !code.contains("Rgba { r") && !code.contains("rgb("),
             "hardcoded chrome color crept back into app.rs"
         );
+    }
+
+    // ── Sprint 4: typography ───────────────────────────────────────────
+
+    /// ⌘+ eleven times from 15pt clamps at 20; ⌘− underflows to 12; a
+    /// step that can't move returns None (nothing to re-measure).
+    #[test]
+    fn font_size_commands_clamp() {
+        let mut ide = Ide::new(fixed_dark());
+        assert_eq!(ide.font_size(), 15.0);
+        for _ in 0..5 {
+            match ide.handle_event(&menu(menu_cmd::FONT_UP)) {
+                IdeAction::Remeasure => {}
+                other => panic!("font-up should request a remeasure, got {other:?}"),
+            }
+        }
+        assert_eq!(ide.font_size(), 20.0, "upper clamp");
+        assert!(matches!(ide.handle_event(&menu(menu_cmd::FONT_UP)), IdeAction::None));
+
+        for _ in 0..15 {
+            ide.handle_event(&menu(menu_cmd::FONT_DOWN));
+        }
+        assert_eq!(ide.font_size(), 12.0, "lower clamp");
+        assert!(matches!(ide.handle_event(&menu(menu_cmd::FONT_DOWN)), IdeAction::None));
+
+        // The zoom survives a re-theme (appearance change).
+        ide.set_theme(fixed_light());
+        assert_eq!(ide.font_size(), 12.0, "font size survives re-theme");
+    }
+
+    /// Chrome text uses the system font at the design's type scale
+    /// (13pt tabs, 11pt status); code text uses the mono family.
+    #[test]
+    fn chrome_uses_system_font_and_type_scale() {
+        let mut ide = Ide::new(fixed_dark());
+        ide.set_metrics(8.0, 16.0, 12.0);
+        let cmds = ide.render(Rect { x0: 0.0, y0: 0.0, x1: 1000.0, y1: 680.0 });
+        let mut chrome_sizes = Vec::new();
+        let mut code_families = Vec::new();
+        for c in &cmds {
+            if let SurfaceCmd::DrawTextRun { run } = c {
+                match run.family.as_str() {
+                    "__system" => chrome_sizes.push(run.size),
+                    f => code_families.push(f.to_string()),
+                }
+            }
+        }
+        assert!(!chrome_sizes.is_empty());
+        assert!(
+            chrome_sizes.iter().all(|s| (s - 13.0).abs() < 0.01 || (s - 11.0).abs() < 0.01),
+            "chrome sizes must be 13/11pt, got {chrome_sizes:?}"
+        );
+        assert!(
+            code_families.iter().all(|f| f == "__mono"),
+            "code runs must use __mono, got {code_families:?}"
+        );
+    }
+
+    /// Rendering is deterministic for a fixed state — guards the Menlo
+    /// fallback metric baseline (two renders must agree byte-for-byte at
+    /// the command level).
+    #[test]
+    fn render_is_deterministic_for_fixed_state() {
+        let mut a = Ide::new(fixed_dark());
+        a.set_metrics(8.0, 16.0, 12.0);
+        let mut b = Ide::new(fixed_dark());
+        b.set_metrics(8.0, 16.0, 12.0);
+        let ca = a.render(Rect { x0: 0.0, y0: 0.0, x1: 1000.0, y1: 680.0 });
+        let cb = b.render(Rect { x0: 0.0, y0: 0.0, x1: 1000.0, y1: 680.0 });
+        assert_eq!(format!("{ca:?}"), format!("{cb:?}"));
     }
 }

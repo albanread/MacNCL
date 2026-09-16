@@ -18,6 +18,7 @@
 
 use core_foundation::attributed_string::CFMutableAttributedString;
 use core_foundation::base::{CFRange, TCFType};
+use std::sync::OnceLock;
 use core_foundation::string::CFString;
 use core_graphics::base::kCGImageAlphaPremultipliedLast;
 use core_graphics::color::CGColor;
@@ -39,12 +40,56 @@ pub struct TextMetrics {
     pub line_count: u32,
 }
 
+// ── Font resolution ────────────────────────────────────────────────────────
+
+/// Optional AppKit-backed resolver for the private system faces: SF Mono
+/// has no public CoreText name (SFMono-Regular etc. don't resolve), so the
+/// `mac-gui` layer installs a hook that goes through
+/// `NSFont.monospacedSystemFont`. Without it (headless/CI), `__mono`
+/// falls back to Menlo.
+type FontResolver = fn(family: &str, size: f32) -> Option<core_text::font::CTFont>;
+static RESOLVER: OnceLock<FontResolver> = OnceLock::new();
+
+/// Install the AppKit font resolver (once, at GUI startup).
+pub fn register_font_resolver(f: FontResolver) {
+    let _ = RESOLVER.set(f);
+}
+
+/// Resolve a font by abstract family name. `__system` / `__system-bold`
+/// map to SF Pro via CoreText's dot-names (headless-safe); `__mono` wants
+/// the resolver's SF Mono and falls back to Menlo. Anything else is a
+/// literal family name, falling back to Helvetica.
+fn resolve_font(family: &str, size: f32) -> Option<core_text::font::CTFont> {
+    if family.starts_with("__") {
+        if let Some(r) = RESOLVER.get() {
+            if let Some(f) = r(family, size) {
+                return Some(f);
+            }
+        }
+    }
+    let name = match family {
+        "__system" => ".AppleSystemUIFont",
+        "__system-bold" => ".AppleSystemUIFontBold",
+        "__mono" => "Menlo",
+        other => other,
+    };
+    core_text::font::new_from_name(name, size as f64)
+        .or_else(|_| core_text::font::new_from_name("Helvetica", size as f64))
+        .ok()
+}
+
+/// The display name actually used for a family — the boot log line and
+/// the resolution tests read this.
+pub fn resolved_font_name(family: &str, size: f32) -> String {
+    resolve_font(family, size)
+        .map(|f| f.postscript_name().to_string())
+        .unwrap_or_else(|| "<unresolved>".into())
+}
+
 /// Build a `CTLine` (and its font ascent) for a run. Falls back to
 /// Helvetica if the requested family is unavailable.
 fn build_line(run: &TextRun) -> Option<(CTLine, f32)> {
-    let font = core_text::font::new_from_name(&run.family, run.size as f64)
-        .or_else(|_| core_text::font::new_from_name("Helvetica", run.size as f64))
-        .ok()?;
+    let font = resolve_font(&run.family, run.size)?;
     let ascent = font.ascent() as f32;
 
     let mut attr = CFMutableAttributedString::new();
@@ -576,6 +621,49 @@ mod tests {
     }
     fn blue() -> Rgba {
         Rgba { r: 0.0, g: 0.0, b: 1.0, a: 1.0 }
+    }
+
+    // ── Sprint 4: system font resolution ────────────────────────────────
+
+    fn measure_family(family: &str) -> Option<(f32, f32)> {
+        let run = TextRun {
+            text: "Mxjg".into(),
+            origin: Point { x: 0.0, y: 0.0 },
+            family: family.into(),
+            size: 15.0,
+            weight: 400,
+            style: crate::igui_paint::FontStyle::Normal,
+            stretch: crate::igui_paint::FontStretch::Normal,
+            locale: "en-us".into(),
+            color: red(),
+            max_width: None,
+            alignment: crate::igui_paint::TextAlign::Leading,
+            trimming: crate::igui_paint::TextTrimming::None,
+        };
+        CgCanvas::measure_text_run(&run).map(|m| (m.width, m.height))
+    }
+
+    /// `__system` must resolve to a real (non-fallback) face and `__mono`
+    /// to SF Mono when the resolver is installed, Menlo otherwise — never
+    /// an error. The system face must be measurably different from Menlo.
+    #[test]
+    fn system_font_families_resolve_or_fallback() {
+        let sys = resolved_font_name("__system", 13.0);
+        assert!(!sys.is_empty() && sys != "<unresolved>");
+        assert_ne!(sys, "Helvetica", "__system must not hit the error fallback");
+
+        // No resolver registered in tests → the Menlo fallback path.
+        let mono = resolved_font_name("__mono", 15.0);
+        assert_eq!(mono, "Menlo-Regular", "headless __mono falls back to Menlo");
+
+        // The system font has different metrics than Menlo (proportional
+        // vs monospace) — the resolution is real, not aliased.
+        let s = measure_family("__system").expect("__system measures");
+        let m = measure_family("Menlo").expect("Menlo measures");
+        assert!(
+            (s.0 - m.0).abs() > 0.5,
+            "system font width {s:?} suspiciously equals Menlo {m:?}"
+        );
     }
 
     #[test]

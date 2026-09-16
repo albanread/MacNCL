@@ -92,6 +92,9 @@ impl SystemTheme {
     /// calls `set_metrics` as before.
     pub fn to_editor_theme(&self) -> EditorTheme {
         EditorTheme {
+            // `__mono` → SF Mono via the AppKit resolver, Menlo headless.
+            family: "__mono".into(),
+            size: 15.0,
             bg: self.editor_bg,
             fg: self.syntax.fg,
             caret: self.accent,
