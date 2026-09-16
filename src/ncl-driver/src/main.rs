@@ -379,6 +379,14 @@ fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
             }
         }
 
+        // Open injection (NCL_GUI_OPEN=<path>): verify the panel/recents/
+        // drop pipeline end-to-end without a human picking in the panel.
+        if let Some(path) = std::env::var_os("NCL_GUI_OPEN") {
+            igui_events::push(IGuiEvent::Open {
+                path: path.to_string_lossy().into_owned(),
+            });
+        }
+
         // ── Central cooperative event loop ───────────────────────────────
         //
         // ONE loop, on this single worker (language) thread, serves every
@@ -486,6 +494,7 @@ fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
                     let want_title = ide.window_title();
                     if want_title != last_title {
                         window::set_window_title(window::MAIN_ID, &want_title);
+                        ncl_runtime::igui_mac::menu::set_save_suggested_name(&want_title);
                         last_title = want_title;
                     }
                     let want_subtitle = ide.window_subtitle();

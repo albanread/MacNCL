@@ -28,7 +28,8 @@ use objc2::rc::Retained;
 use objc2::MainThreadMarker;
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent, NSEventMask,
-    NSEventType, NSImage, NSImageScaling, NSImageView, NSWindow, NSWindowStyleMask,
+    NSEventType, NSImage, NSImageScaling, NSImageView, NSPasteboardType, NSPasteboardTypeFileURL,
+    NSAutoresizingMaskOptions, NSView, NSWindow, NSWindowStyleMask,
 };
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSTimer};
@@ -81,6 +82,8 @@ enum UiCmd {
     Close { id: i64 },
     Title { id: i64, title: String },
     Subtitle { id: i64, subtitle: String },
+    /// Rebuild the Open Recent submenu from the recents store.
+    RebuildRecents,
 }
 
 fn cmd_queue() -> &'static Mutex<VecDeque<UiCmd>> {
@@ -108,6 +111,13 @@ pub fn set_window_title(id: i64, title: &str) {
 /// the active buffer's directory). Worker-callable.
 pub fn set_window_subtitle(id: i64, subtitle: &str) {
     post(UiCmd::Subtitle { id, subtitle: subtitle.to_string() });
+}
+
+/// Ask the main thread to refresh the Open Recent submenu (the recents
+/// store just changed). Worker-callable.
+#[cfg(feature = "mac-gui")]
+pub(crate) fn request_recents_rebuild() {
+    post(UiCmd::RebuildRecents);
 }
 
 // ── Per-window redraw timers (`set-redraw-rate`) ───────────────────────
@@ -276,6 +286,31 @@ impl WindowManager {
         // state the image is exactly the view size, so this is a 1:1 blit.
         view.setImageScaling(NSImageScaling::ScaleAxesIndependently);
         window.setContentView(Some(&view));
+        // IDE window only: a transparent overlay view registers as a file
+        // drag destination (NSImageView can't) and forwards dropped Lisp
+        // files as `Open` events. Child windows keep plain image views.
+        if is_main {
+            use objc2::ClassType;
+            let drop: objc2::rc::Retained<DropView> =
+                unsafe { objc2::msg_send![DropView::class(), new] };
+            drop.setFrame(view.bounds());
+            drop.setAutoresizingMask(
+                NSAutoresizingMaskOptions::ViewWidthSizable
+                    | NSAutoresizingMaskOptions::ViewHeightSizable,
+            );
+            // Retain the constant file-url type for the array of objects.
+            // SAFETY: retaining the constant file-url pasteboard type.
+            let file_url: objc2::rc::Retained<objc2_foundation::NSString> =
+                unsafe {
+                    objc2::rc::Retained::retain(
+                        NSPasteboardTypeFileURL as *const _ as *mut objc2_foundation::NSString,
+                    )
+                }
+                .expect("static pasteboard type");
+            let types = objc2_foundation::NSArray::from_retained_slice(&[file_url]);
+            drop.registerForDraggedTypes(&types);
+            view.addSubview(&drop);
+        }
         window.makeKeyAndOrderFront(None);
         let num = window.windowNumber();
         self.wins.insert(id, WinEntry { window, view, w, h, num });
@@ -423,6 +458,7 @@ impl WindowManager {
                 UiCmd::Close { id } => self.close(id),
                 UiCmd::Title { id, title } => self.set_title(id, &title),
                 UiCmd::Subtitle { id, subtitle } => self.set_subtitle(id, &subtitle),
+                UiCmd::RebuildRecents => menu::apply_recents_rebuild(),
             }
         }
     }
@@ -710,6 +746,84 @@ where
     app.run();
     Ok(())
 }
+
+// ── Drag & drop overlay ──────────────────────────────────────────────────
+
+/// Read the file paths from a dragging session's pasteboard, keeping only
+/// Lisp-source files. Main thread (the pasteboard belongs to the drag).
+fn drag_file_paths(sender: &objc2::runtime::AnyObject) -> Vec<String> {
+    use objc2::msg_send;
+    use objc2::ClassType;
+    use objc2_foundation::{NSArray, NSObject, NSString, NSURL};
+
+    let pb: Option<objc2::rc::Retained<objc2_app_kit::NSPasteboard>> =
+        unsafe { msg_send![sender, draggingPasteboard] };
+    let Some(pb) = pb else { return Vec::new() };
+    // `readObjectsForClasses:` with NSURL — a class "object" via `self`.
+    let url_as_obj: objc2::rc::Retained<NSObject> = unsafe { msg_send![NSURL::class(), self] };
+    let classes = NSArray::from_retained_slice(&[url_as_obj]);
+    let objs: Option<objc2::rc::Retained<NSArray<NSObject>>> = unsafe {
+        msg_send![
+            &pb,
+            readObjectsForClasses: &*classes,
+            options: std::ptr::null::<objc2_foundation::NSDictionary>()
+        ]
+    };
+    let mut paths = Vec::new();
+    if let Some(objs) = objs {
+        for obj in objs.iter() {
+            // SAFETY: every object came from the NSURL class filter.
+            let path: Option<objc2::rc::Retained<NSString>> =
+                unsafe { msg_send![&*obj, path] };
+            if let Some(p) = path {
+                paths.push(p.to_string());
+            }
+        }
+    }
+    menu::filter_drop_paths(&paths)
+}
+
+/// A transparent drag-destination overlay mounted over the IDE's image
+/// view (which can't register for drags). Accepts only Lisp-source files;
+/// accepted drops post one `Open` event per file.
+objc2::define_class!(
+    #[unsafe(super(NSView))]
+    #[name = "NCLDropView"]
+    struct DropView;
+
+    impl DropView {
+        #[unsafe(method(prepareForDragOperation:))]
+        fn prepare(&self, _sender: Option<&objc2::runtime::AnyObject>) -> bool {
+            true
+        }
+
+        #[unsafe(method(draggingEntered:))]
+        fn dragging_entered(
+            &self,
+            sender: Option<&objc2::runtime::AnyObject>,
+        ) -> objc2_app_kit::NSDragOperation {
+            let Some(sender) = sender else { return objc2_app_kit::NSDragOperation::None };
+            if drag_file_paths(sender).is_empty() {
+                objc2_app_kit::NSDragOperation::None // reject: no highlight, spring-back
+            } else {
+                objc2_app_kit::NSDragOperation::Copy
+            }
+        }
+
+        #[unsafe(method(performDragOperation:))]
+        fn perform_drag(&self, sender: Option<&objc2::runtime::AnyObject>) -> objc2::runtime::Bool {
+            let Some(sender) = sender else { return false.into() };
+            let paths = drag_file_paths(sender);
+            if paths.is_empty() {
+                return false.into();
+            }
+            for p in paths {
+                igui_events::push(IGuiEvent::Open { path: p });
+            }
+            true.into()
+        }
+    }
+);
 
 /// Translate one `NSEvent` for window `child_id` and push the resulting
 /// `IGuiEvent`(s). `view_height` is that window's content height (for the

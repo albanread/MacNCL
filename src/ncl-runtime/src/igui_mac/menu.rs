@@ -183,6 +183,247 @@ fn save_enabled() -> bool {
     SAVE_ENABLED.load(std::sync::atomic::Ordering::Relaxed)
 }
 
+// ── Open Recent store ─────────────────────────────────────────────────────
+
+/// How many recents are kept.
+pub const RECENTS_MAX: usize = 10;
+
+/// The recents file: `~/Library/Application Support/MacNCL/recents.json`
+/// (a plain JSON array of paths). `NCL_RECENTS_FILE` overrides the
+/// location so tests stay hermetic.
+fn recents_file() -> std::path::PathBuf {
+    if let Some(p) = std::env::var_os("NCL_RECENTS_FILE") {
+        return std::path::PathBuf::from(p);
+    }
+    let mut p = std::path::PathBuf::from(
+        std::env::var("HOME").unwrap_or_else(|_| "/tmp".into()),
+    );
+    p.push("Library/Application Support/MacNCL/recents.json");
+    p
+}
+
+fn escape_json(s: &str) -> String {
+    let mut out = String::with_capacity(s.len() + 2);
+    for c in s.chars() {
+        match c {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            _ => out.push(c),
+        }
+    }
+    out
+}
+
+/// Load the recents list (missing/corrupt file → empty).
+pub fn recent_paths() -> Vec<String> {
+    let Ok(text) = std::fs::read_to_string(recents_file()) else {
+        return Vec::new();
+    };
+    let mut out = Vec::new();
+    let mut rest = text.trim().trim_start_matches('[');
+    // Hand-parsed JSON string array — the file is ours and tiny; no
+    // parser dependency needed.
+    while let Some(q) = rest.strip_prefix('"') {
+        let Some(end) = q.find('"') else { break };
+        let mut path = String::new();
+        let mut chars = q[..end].chars();
+        while let Some(c) = chars.next() {
+            if c == '\\' {
+                if let Some(n) = chars.next() {
+                    path.push(n);
+                }
+            } else {
+                path.push(c);
+            }
+        }
+        out.push(path);
+        rest = q[end + 1..].trim_start().trim_start_matches(',');
+    }
+    out
+}
+
+fn persist_recents(paths: &[String]) {
+    let file = recents_file();
+    let _ = std::fs::create_dir_all(file.parent().unwrap_or(std::path::Path::new("/")));
+    let body: Vec<String> = paths.iter().map(|p| format!("\"{}\"", escape_json(p))).collect();
+    let _ = std::fs::write(file, format!("[{}]\n", body.join(",")).as_bytes());
+}
+
+/// Record an opened file: front of the list, deduped, capped at
+/// [`RECENTS_MAX`], persisted immediately.
+pub fn record_recent(path: &str) {
+    let mut paths = recent_paths();
+    paths.retain(|p| p != path);
+    paths.insert(0, path.to_string());
+    paths.truncate(RECENTS_MAX);
+    persist_recents(&paths);
+    // The main thread rebuilds the submenu so the menu shows fresh data.
+    #[cfg(feature = "mac-gui")]
+    crate::igui_mac::window::request_recents_rebuild();
+}
+
+// ── Drag type filter ──────────────────────────────────────────────────────
+
+/// File extensions the IDE accepts as drops/opens. Lowercase, no dot.
+fn allowed_extensions() -> &'static [&'static str] {
+    &["lisp", "lsp", "cl", "txt"]
+}
+
+/// Whether a path's extension makes it droppable/openable (AC: .lisp in,
+/// .png out).
+pub fn accepts_drop_path(path: &str) -> bool {
+    let Some(ext) = path.rsplit('.').next() else { return false };
+    ext.eq_ignore_ascii_case("lisp")
+        || ext.eq_ignore_ascii_case("lsp")
+        || ext.eq_ignore_ascii_case("cl")
+        || ext.eq_ignore_ascii_case("txt")
+}
+
+/// Keep only the droppable paths from a drag, preserving order.
+pub fn filter_drop_paths(paths: &[String]) -> Vec<String> {
+    paths.iter().filter(|p| accepts_drop_path(p)).cloned().collect()
+}
+
+// ── Open/save panels (main thread) ────────────────────────────────────────
+
+/// Suggested name for the save panel's name field (the active buffer's
+/// file name). Published by the driver alongside the window title.
+static SAVE_SUGGESTED: std::sync::Mutex<String> = std::sync::Mutex::new(String::new());
+
+#[cfg(feature = "mac-gui")]
+pub fn set_save_suggested_name(name: &str) {
+    *SAVE_SUGGESTED.lock().unwrap_or_else(|e| e.into_inner()) = name.to_string();
+}
+
+#[cfg(feature = "mac-gui")]
+fn save_suggested_name() -> String {
+    let s = SAVE_SUGGESTED.lock().unwrap_or_else(|e| e.into_inner());
+    if s.is_empty() { "untitled.lisp".into() } else { s.clone() }
+}
+
+/// The file-type restriction shared by both panels.
+#[cfg(feature = "mac-gui")]
+fn allowed_types_array(
+    mtm: objc2::MainThreadMarker,
+) -> objc2::rc::Retained<objc2_foundation::NSArray<objc2_foundation::NSString>> {
+    use objc2_foundation::{NSArray, NSString};
+    let items: Vec<objc2::rc::Retained<NSString>> =
+        allowed_extensions().iter().map(|e| NSString::from_str(e)).collect();
+    NSArray::from_retained_slice(&items)
+}
+
+/// Run the open panel (⌘O / File ▸ Open…). On OK, posts `IGuiEvent::Open`
+/// with the chosen path. Main thread only — called from the menu
+/// dispatcher's selector, which is where ⌘O lands via AppKit's own menu
+/// matching.
+#[cfg(feature = "mac-gui")]
+pub fn run_open_panel() {
+    use objc2_app_kit::{NSModalResponse, NSModalResponseOK, NSOpenPanel};
+    use objc2_foundation::NSString;
+
+    let mtm = objc2::MainThreadMarker::new().expect("open panel on main thread");
+    let panel = NSOpenPanel::new(mtm);
+    panel.setCanChooseFiles(true);
+    panel.setCanChooseDirectories(false);
+    panel.setAllowsMultipleSelection(false);
+    #[allow(deprecated)]
+    panel.setAllowedFileTypes(Some(&allowed_types_array(mtm)));
+    if panel.runModal() == NSModalResponseOK {
+        if let Some(path) = panel.URL().and_then(|u| u.path()) {
+            crate::igui_events::push(crate::igui_events::IGuiEvent::Open {
+                path: path.to_string(),
+            });
+        }
+    }
+}
+
+/// Run the save panel (⇧⌘S / File ▸ Save As…). On OK, posts
+/// `IGuiEvent::SaveAs` with the chosen path.
+#[cfg(feature = "mac-gui")]
+pub fn run_save_panel() {
+    use objc2_app_kit::{NSModalResponse, NSModalResponseOK, NSSavePanel};
+    use objc2_foundation::NSString;
+
+    let mtm = objc2::MainThreadMarker::new().expect("save panel on main thread");
+    let panel = NSSavePanel::new(mtm);
+    panel.setNameFieldStringValue(&NSString::from_str(&save_suggested_name()));
+    #[allow(deprecated)]
+    panel.setAllowedFileTypes(Some(&allowed_types_array(mtm)));
+    if panel.runModal() == NSModalResponseOK {
+        if let Some(path) = panel.URL().and_then(|u| u.path()) {
+            crate::igui_events::push(crate::igui_events::IGuiEvent::SaveAs {
+                path: path.to_string(),
+            });
+        }
+    }
+}
+
+// ── Open Recent submenu ───────────────────────────────────────────────────
+
+/// The recents submenu, held for main-thread rebuilds. NSMenu is not
+/// Send/Sync; the wrapper just makes it storable — it is only touched on
+/// the main thread.
+#[cfg(feature = "mac-gui")]
+struct SyncMenuPtr(*mut objc2_app_kit::NSMenu);
+#[cfg(feature = "mac-gui")]
+unsafe impl Send for SyncMenuPtr {}
+#[cfg(feature = "mac-gui")]
+unsafe impl Sync for SyncMenuPtr {}
+
+#[cfg(feature = "mac-gui")]
+static RECENTS_MENU: std::sync::OnceLock<SyncMenuPtr> = std::sync::OnceLock::new();
+
+/// Rebuild the Open Recent submenu from the store. Main thread; the
+/// worker asks for this via `window::request_recents_rebuild` whenever
+/// `record_recent` changes the list.
+#[cfg(feature = "mac-gui")]
+pub(crate) fn apply_recents_rebuild() {
+    use objc2::rc::Retained;
+    use objc2_app_kit::{NSMenu, NSMenuItem};
+    use objc2_foundation::NSString;
+
+    let mtm = objc2::MainThreadMarker::new().expect("recents rebuild on main thread");
+    let Some(&SyncMenuPtr(ptr)) = RECENTS_MENU.get() else { return };
+    // SAFETY: the submenu is alive for the process lifetime (held by the
+    // menu bar) and confined to the main thread.
+    let menu: &NSMenu = unsafe { &*ptr };
+    unsafe { menu.removeAllItems() };
+    let dispatcher = dispatcher_instance();
+    let target: &objc2::runtime::AnyObject = unsafe {
+        &*(objc2::rc::Retained::as_ptr(dispatcher)
+            as *const objc2::runtime::AnyObject)
+    };
+    let paths = recent_paths();
+    if paths.is_empty() {
+        let it = NSMenuItem::new(mtm);
+        it.setTitle(&NSString::from_str("No Recents"));
+        it.setEnabled(false);
+        unsafe { menu.addItem(&it) };
+        return;
+    }
+    for p in &paths {
+        let it = NSMenuItem::new(mtm);
+        let name = p.rsplit('/').next().unwrap_or(p);
+        it.setTitle(&NSString::from_str(&format!("{name} — {}", parent_of(p))));
+        // SAFETY: setter with a plain string value.
+        unsafe { it.setRepresentedObject(Some(&NSString::from_str(p))) };
+        // SAFETY: dispatcher outlives the menu; known selector.
+        unsafe {
+            it.setTarget(Some(target));
+            it.setAction(Some(objc2::sel!(nclOpenRecent:)));
+        }
+        unsafe { menu.addItem(&it) };
+    }
+}
+
+#[cfg(feature = "mac-gui")]
+fn parent_of(p: &str) -> &str {
+    match p.rsplit_once('/') {
+        Some((d, _)) if !d.is_empty() => d,
+        _ => "/",
+    }
+}
+
 // ── NSMenu build + dispatcher (AppKit) ────────────────────────────────────
 
 /// Build and install the main menu. Must run on the main thread before
@@ -257,9 +498,48 @@ pub fn install(app: &NSApplication, mtm: objc2::MainThreadMarker) {
     for spec in MENUS {
         let m = NSMenu::new(mtm);
         m.setTitle(&NSString::from_str(spec.title));
-        for it in spec.items {
-            let item = cmd_item(it.label, it.key.as_ref().unwrap(), it.opcode);
-            m.addItem(&item);
+        if spec.title == "File" {
+            // File is built manually: it interleaves the registry items
+            // with the panel-driven Open… / Save As… and the recents
+            // submenu (those act on the main thread, not via opcodes).
+            let dispatcher_item = |label: &str, key: &str, mask: MF, sel: objc2::runtime::Sel| {
+                let it = NSMenuItem::new(mtm);
+                it.setTitle(&NSString::from_str(label));
+                if !key.is_empty() {
+                    it.setKeyEquivalent(&NSString::from_str(key));
+                    it.setKeyEquivalentModifierMask(mask);
+                }
+                // SAFETY: dispatcher target outlives the menu.
+                unsafe {
+                    it.setTarget(Some(target));
+                    it.setAction(Some(sel));
+                }
+                it
+            };
+            // New (⌘N)
+            let it = cmd_item(spec.items[0].label, spec.items[0].key.as_ref().unwrap(), spec.items[0].opcode);
+            m.addItem(&it);
+            m.addItem(&dispatcher_item("Open…", "o", MF::Command, objc2::sel!(nclOpenDocument:)));
+            // Open Recent ▸ (rebuilt from the store; see apply_recents_rebuild)
+            let recents = NSMenu::new(mtm);
+            let _ = RECENTS_MENU.set(SyncMenuPtr(Retained::as_ptr(&recents) as *mut NSMenu));
+            let recents_root = NSMenuItem::new(mtm);
+            recents_root.setTitle(&NSString::from_str("Open Recent"));
+            recents_root.setSubmenu(Some(&recents));
+            m.addItem(&recents_root);
+            // Close Tab (⌘W), Save (⌘S) from the registry.
+            let it = cmd_item(spec.items[1].label, spec.items[1].key.as_ref().unwrap(), spec.items[1].opcode);
+            m.addItem(&it);
+            let it = cmd_item(spec.items[2].label, spec.items[2].key.as_ref().unwrap(), spec.items[2].opcode);
+            m.addItem(&it);
+            m.addItem(&dispatcher_item(
+                "Save As…", "S", MF::Command | MF::Shift, objc2::sel!(nclSaveDocumentAs:),
+            ));
+        } else {
+            for it in spec.items {
+                let item = cmd_item(it.label, it.key.as_ref().unwrap(), it.opcode);
+                m.addItem(&item);
+            }
         }
         let root = NSMenuItem::new(mtm);
         root.setTitle(&NSString::from_str(spec.title));
@@ -284,6 +564,7 @@ pub fn install(app: &NSApplication, mtm: objc2::MainThreadMarker) {
     app.setWindowsMenu(Some(&win));
 
     app.setMainMenu(Some(&main));
+    apply_recents_rebuild();
 }
 
 /// Translate a registry key equivalent into NSMenuItem terms:
@@ -347,6 +628,33 @@ objc2::define_class!(
                 menu_id: menu_cmd::IDE,
                 item_id: tag as i64,
             });
+        }
+
+        /// File ▸ Open… — the panel must run on this (main) thread, so it
+        /// is driven by the selector rather than an opcode round-trip.
+        #[unsafe(method(nclOpenDocument:))]
+        fn open_document(&self, _sender: Option<&objc2::runtime::AnyObject>) {
+            run_open_panel();
+        }
+
+        /// File ▸ Save As… (⇧⌘S).
+        #[unsafe(method(nclSaveDocumentAs:))]
+        fn save_document_as(&self, _sender: Option<&objc2::runtime::AnyObject>) {
+            run_save_panel();
+        }
+
+        /// Open Recent ▸ — the item carries the full path in its
+        /// representedObject.
+        #[unsafe(method(nclOpenRecent:))]
+        fn open_recent(&self, sender: Option<&objc2::runtime::AnyObject>) {
+            let Some(item) = sender else { return };
+            let path: Option<objc2::rc::Retained<objc2_foundation::NSString>> =
+                unsafe { objc2::msg_send![item, representedObject] };
+            if let Some(p) = path {
+                crate::igui_events::push(crate::igui_events::IGuiEvent::Open {
+                    path: p.to_string(),
+                });
+            }
         }
 
         #[unsafe(method(validatesMenuItem:))]
@@ -479,5 +787,59 @@ mod tests {
         set_save_enabled(!before);
         assert_eq!(save_enabled(), !before);
         set_save_enabled(before);
+    }
+
+    // ── Sprint 5: recents + drag filter ────────────────────────────────
+
+    /// Point the recents store at a fresh temp file (tests stay hermetic;
+    /// the suite runs single-threaded on this target).
+    fn isolate_recents() -> std::path::PathBuf {
+        let p = std::env::temp_dir().join(format!("ncl_recents_test_{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&p);
+        // SAFETY: test-only env mutation; suite is single-threaded here.
+        unsafe { std::env::set_var("NCL_RECENTS_FILE", &p) };
+        p
+    }
+
+    /// Ten distinct opens fill the list most-recent-first; an eleventh
+    /// evicts the oldest; the list persists across a "relaunch" (re-read).
+    #[test]
+    fn recents_update_and_cap() {
+        let file = isolate_recents();
+        for i in 0..11 {
+            record_recent(&format!("/tmp/f{i}.lisp"));
+        }
+        let paths = recent_paths();
+        assert_eq!(paths.len(), RECENTS_MAX, "capped at {}", RECENTS_MAX);
+        assert_eq!(paths[0], "/tmp/f10.lisp", "most recent first");
+        assert!(
+            !paths.contains(&"/tmp/f0.lisp".to_string()),
+            "oldest evicted: {paths:?}"
+        );
+        // Re-opening an existing path moves it to the front, no dupes.
+        record_recent("/tmp/f3.lisp");
+        let paths = recent_paths();
+        assert_eq!(paths[0], "/tmp/f3.lisp");
+        assert_eq!(paths.iter().filter(|p| p.as_str() == "/tmp/f3.lisp").count(), 1);
+        // Persists: a fresh read (new "launch") sees the same list.
+        assert_eq!(recent_paths(), paths);
+        let _ = std::fs::remove_file(file);
+    }
+
+    /// The drag/open type filter: Lisp sources in, anything else out.
+    #[test]
+    fn drag_types_filter() {
+        assert!(accepts_drop_path("/a/b/code.lisp"));
+        assert!(accepts_drop_path("/a/b/CODE.LSP"));
+        assert!(accepts_drop_path("/a/b/notes.cl"));
+        assert!(accepts_drop_path("/a/b/notes.txt"));
+        assert!(!accepts_drop_path("/a/pic.png"));
+        assert!(!accepts_drop_path("/a/binary"));
+        let kept = filter_drop_paths(&[
+            "/x/a.lisp".into(),
+            "/x/b.png".into(),
+            "/x/c.lsp".into(),
+        ]);
+        assert_eq!(kept, vec!["/x/a.lisp".to_string(), "/x/c.lsp".to_string()]);
     }
 }

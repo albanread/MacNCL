@@ -211,6 +211,15 @@ pub enum IGuiEvent {
     ReplSubmit {
         child_id: i64,
     },
+    /// "Open this file in the IDE" — from the open panel, a recents pick,
+    /// or a Finder drag onto the window. Global (any pane may react).
+    Open {
+        path: String,
+    },
+    /// "Save the active buffer to this path" — from the save panel.
+    SaveAs {
+        path: String,
+    },
 }
 
 impl IGuiEvent {
@@ -363,7 +372,9 @@ fn event_target(ev: &IGuiEvent) -> Option<i64> {
         IGuiEvent::FrameClose
         | IGuiEvent::ThemeChange
         | IGuiEvent::EvalBuffer { .. }
-        | IGuiEvent::Menu { .. } => None,
+        | IGuiEvent::Menu { .. }
+        | IGuiEvent::Open { .. }
+        | IGuiEvent::SaveAs { .. } => None,
         // Per-child: route to specific queue + CATCH_ALL
         IGuiEvent::Key { child_id, .. }
         | IGuiEvent::Char { child_id, .. }

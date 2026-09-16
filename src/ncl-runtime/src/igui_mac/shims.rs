@@ -299,6 +299,16 @@ fn event_to_plist(m: &mut MutatorState, coord: &GcCoordinator, ev: IGuiEvent) ->
             pairs.push((kw(coord, "KIND"), kw(coord, "REPL-SUBMIT")));
             pairs.push((kw(coord, "CHILD-ID"), Word::fixnum(child_id)));
         }
+        IGuiEvent::Open { path } => {
+            pairs.push((kw(coord, "KIND"), kw(coord, "OPEN")));
+            let s = gc_string::alloc_string_in_young(m, path.as_str());
+            pairs.push((kw(coord, "PATH"), s));
+        }
+        IGuiEvent::SaveAs { path } => {
+            pairs.push((kw(coord, "KIND"), kw(coord, "SAVE-AS")));
+            let s = gc_string::alloc_string_in_young(m, path.as_str());
+            pairs.push((kw(coord, "PATH"), s));
+        }
     }
     let mut acc = Word::NIL;
     for (k, v) in pairs.into_iter().rev() {

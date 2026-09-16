@@ -400,6 +400,15 @@ impl Editor {
         Ok(())
     }
 
+    /// Save to an explicit path (Save As…): writes the buffer, adopts the
+    /// path as the backing file, clears dirty. Returns the path on success.
+    pub fn save_to(&mut self, path: &str) -> std::io::Result<()> {
+        std::fs::write(path, self.text())?;
+        self.file_path = Some(path.to_string());
+        self.dirty = false;
+        Ok(())
+    }
+
     /// Save to the backing file. `Ok(Some(path))` on success, `Ok(None)`
     /// if there is no backing file yet.
     pub fn save(&mut self) -> std::io::Result<Option<String>> {

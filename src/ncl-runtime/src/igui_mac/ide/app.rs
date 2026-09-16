@@ -14,6 +14,7 @@ use crate::igui_events::{menu_cmd, modifier, IGuiEvent};
 use crate::igui_mac::events::vk;
 use crate::igui_mac::ide::editor::{Editor, Theme};
 use crate::igui_mac::ide::repl::Repl;
+use crate::igui_mac::menu;
 use crate::igui_mac::theme::{fixed_dark, fixed_light, SystemTheme};
 use crate::igui_paint::{
     FontStretch, FontStyle, Point, Rect, Rgba, SurfaceCmd, TextAlign, TextRun, TextTrimming,
@@ -295,8 +296,10 @@ impl Ide {
     }
 
     /// Load a file: reuse the active buffer if it's an untitled, unmodified
-    /// scratch buffer; otherwise open a new tab.
+    /// scratch buffer; otherwise open a new tab. Records the file in the
+    /// Open Recent menu.
     pub fn load_file(&mut self, path: &str) {
+        menu::record_recent(path);
         let reuse = self.ed().file_path().is_none() && !self.ed().is_dirty();
         if !reuse {
             self.new_buffer();
@@ -501,6 +504,24 @@ impl Ide {
                     Some(cmd) => self.run_menu_cmd(cmd),
                     None => IdeAction::None,
                 }
+            }
+            // Open a file: from the open panel, a recents pick, or a
+            // Finder drop onto the window.
+            IGuiEvent::Open { path } => {
+                self.load_file(path);
+                IdeAction::None
+            }
+            // Save As…: write the buffer to the chosen path and adopt it.
+            IGuiEvent::SaveAs { path } => {
+                match self.ed_mut().save_to(path) {
+                    Ok(()) => {
+                        self.focus = Focus::Editor;
+                        menu::record_recent(path);
+                        self.repl.info(&format!("; saved {path}"));
+                    }
+                    Err(e) => self.repl.error(&format!("save as {path}: {e}")),
+                }
+                IdeAction::None
             }
             IGuiEvent::Key { vkey, mods, down, .. } if *down => self.on_key(*vkey, *mods),
             IGuiEvent::Char { codepoint, .. } => {
@@ -1256,5 +1277,56 @@ mod tests {
         let ca = a.render(Rect { x0: 0.0, y0: 0.0, x1: 1000.0, y1: 680.0 });
         let cb = b.render(Rect { x0: 0.0, y0: 0.0, x1: 1000.0, y1: 680.0 });
         assert_eq!(format!("{ca:?}"), format!("{cb:?}"));
+    }
+
+    // ── Sprint 5: native files ─────────────────────────────────────────
+
+    fn isolate_recents() {
+        let p = std::env::temp_dir()
+            .join(format!("ncl_recents_ide_test_{}.json", std::process::id()));
+        // SAFETY: test-only env mutation; suite is single-threaded here.
+        unsafe { std::env::set_var("NCL_RECENTS_FILE", &p) };
+    }
+
+    /// An Open event (panel pick / recents / Finder drop) loads the file:
+    /// tab retitled, `; loaded` notice, recents recorded.
+    #[test]
+    fn open_event_loads_file() {
+        isolate_recents();
+        let dir = std::env::temp_dir().join("ncl_open_event.lisp");
+        std::fs::write(&dir, "(* 6 7)\n").unwrap();
+        let mut ide = Ide::new(fixed_dark());
+        ide.handle_event(&IGuiEvent::Open { path: dir.to_str().unwrap().into() });
+        assert_eq!(ide.window_title(), "ncl_open_event.lisp");
+        assert!(matches!(ide.focus, Focus::Editor), "open focuses the editor");
+        assert!(menu::recent_paths().iter().any(|p| p.ends_with("ncl_open_event.lisp")));
+        let _ = std::fs::remove_file(&dir);
+    }
+
+    /// A SaveAs event writes the buffer, clears dirty, adopts the name.
+    #[test]
+    fn save_as_writes_file_and_retitles() {
+        isolate_recents();
+        let path = std::env::temp_dir().join("ncl_save_as.lisp");
+        let path = path.to_str().unwrap().to_string();
+        let _ = std::fs::remove_file(&path);
+        let mut ide = Ide::new(fixed_dark());
+        ide.focus = Focus::Editor;
+        ide.ed_mut().set_text("");
+        for c in "(save-me 42)".chars() {
+            ide.ed_mut().on_char(c as u32);
+        }
+        assert!(ide.can_save(), "sanity: buffer dirty before save");
+        ide.handle_event(&IGuiEvent::SaveAs { path: path.clone() });
+        let written = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(written.trim(), "(save-me 42)");
+        assert!(!ide.can_save(), "save-as clears dirty");
+        assert_eq!(ide.window_title(), "ncl_save_as.lisp");
+        assert_eq!(
+            ide.window_subtitle().trim_end_matches('/'),
+            std::env::temp_dir().to_str().unwrap().trim_end_matches('/'),
+            "subtitle should be the file's directory"
+        );
+        let _ = std::fs::remove_file(&path);
     }
 }
