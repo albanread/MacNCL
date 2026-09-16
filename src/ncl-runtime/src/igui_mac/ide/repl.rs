@@ -37,16 +37,7 @@ pub struct Repl {
     scroll_from_bottom: usize,
     theme: Theme,
     prompt: String,
-    input_color: Rgba,
-    output_color: Rgba,
-    error_color: Rgba,
-    info_color: Rgba,
     visible_transcript_rows: usize,
-}
-
-#[inline]
-fn rgb(r: u8, g: u8, b: u8) -> Rgba {
-    Rgba { r: r as f32 / 255.0, g: g as f32 / 255.0, b: b as f32 / 255.0, a: 1.0 }
 }
 
 /// True if every bracket in `src` is matched, ignoring brackets inside
@@ -106,10 +97,6 @@ impl Repl {
             scroll_from_bottom: 0,
             theme,
             prompt: "λ> ".into(),
-            input_color: rgb(168, 218, 255),
-            output_color: rgb(220, 223, 228),
-            error_color: rgb(231, 111, 81),
-            info_color: rgb(148, 210, 189),
             visible_transcript_rows: 1,
         };
         r.print(LineKind::Info, "NCL REPL — type a form and press Return.");
@@ -121,6 +108,17 @@ impl Repl {
         self.theme.cell_h = cell_h;
         self.theme.ascent = ascent;
         self.input.set_metrics(cell_w, cell_h, ascent);
+    }
+
+    /// Re-theme (appearance change). Keeps the measured metrics.
+    pub fn set_theme(&mut self, t: Theme) {
+        self.theme = t;
+        self.input.set_theme(self.theme.clone());
+    }
+
+    /// Show/hide the input caret (window active state).
+    pub fn set_show_caret(&mut self, v: bool) {
+        self.input.set_show_caret(v);
     }
 
     /// Append text (split on newlines) to the transcript.
@@ -222,11 +220,12 @@ impl Repl {
     }
 
     fn color_for(&self, kind: LineKind) -> Rgba {
+        let t = &self.theme;
         match kind {
-            LineKind::Input => self.input_color,
-            LineKind::Output => self.output_color,
-            LineKind::Error => self.error_color,
-            LineKind::Info => self.info_color,
+            LineKind::Input => t.repl_input,
+            LineKind::Output => t.repl_output,
+            LineKind::Error => t.repl_error,
+            LineKind::Info => t.repl_info,
         }
     }
 
@@ -299,7 +298,7 @@ impl Repl {
                 style: FontStyle::Normal,
                 stretch: FontStretch::Normal,
                 locale: "en-us".into(),
-                color: self.info_color,
+                color: t.prompt,
                 max_width: None,
                 alignment: TextAlign::Leading,
                 trimming: TextTrimming::None,

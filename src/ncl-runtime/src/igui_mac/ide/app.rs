@@ -14,6 +14,7 @@ use crate::igui_events::{menu_cmd, modifier, IGuiEvent};
 use crate::igui_mac::events::vk;
 use crate::igui_mac::ide::editor::{Editor, Theme};
 use crate::igui_mac::ide::repl::Repl;
+use crate::igui_mac::theme::{fixed_dark, fixed_light, SystemTheme};
 use crate::igui_paint::{
     FontStretch, FontStyle, Point, Rect, Rgba, SurfaceCmd, TextAlign, TextRun, TextTrimming,
 };
@@ -112,6 +113,11 @@ pub struct Ide {
     repl: Repl,
     focus: Focus,
     theme: Theme,
+    /// The semantic tokens the chrome is painted from (see `igui_mac::theme`).
+    sys: SystemTheme,
+    /// Whether the IDE window is the key window — inactive windows dim
+    /// their labels and hide the caret, like native Mac apps.
+    window_active: bool,
     cell_w: f32,
     cell_h: f32,
     ascent: f32,
@@ -136,7 +142,8 @@ pub const TRAFFIC_INSET: f32 = 78.0;
 const PLUS_W: f32 = 28.0;
 
 impl Ide {
-    pub fn new(theme: Theme) -> Self {
+    pub fn new(sys: SystemTheme) -> Self {
+        let theme = sys.to_editor_theme();
         let mut editor = Editor::with_text(
             ";; Scratch — edit Lisp here. Cmd-R runs the buffer; Cmd-Return\n\
              ;; evaluates the form at the cursor. Cmd-T new tab, Cmd-W close,\n\
@@ -157,11 +164,40 @@ impl Ide {
             cell_h: theme.cell_h,
             ascent: theme.ascent,
             theme,
+            sys,
+            window_active: true,
             split: 0.62,
             dragging_split: false,
             width: 900.0,
             height: 620.0,
         }
+    }
+
+    /// Re-theme from a new snapshot (appearance/accent change). Carries the
+    /// measured cell metrics across — only colours move.
+    pub fn set_theme(&mut self, sys: SystemTheme) {
+        self.theme = sys.to_editor_theme();
+        self.theme.cell_w = self.cell_w;
+        self.theme.cell_h = self.cell_h;
+        self.theme.ascent = self.ascent;
+        self.sys = sys;
+        let t = self.theme.clone();
+        for b in &mut self.buffers {
+            b.set_theme(t.clone());
+            b.set_metrics(self.cell_w, self.cell_h, self.ascent);
+        }
+        self.repl.set_theme(t);
+    }
+
+    /// Set whether the IDE window is the key window. Inactive windows dim
+    /// labels one tier and hide carets (native Mac behaviour).
+    pub fn set_active(&mut self, active: bool) {
+        self.window_active = active;
+        let show = active;
+        for b in &mut self.buffers {
+            b.set_show_caret(show);
+        }
+        self.repl.set_show_caret(show);
     }
 
     #[inline]
@@ -581,6 +617,16 @@ impl Ide {
         }
     }
 
+    /// A label tier, dimmed one step while the window is inactive (native
+    /// Mac windows drop label opacity in the background).
+    fn tier(&self, primary: Rgba, dimmed: Rgba) -> Rgba {
+        if self.window_active {
+            primary
+        } else {
+            dimmed
+        }
+    }
+
     fn run(&self, text: String, x: f32, y: f32, color: Rgba) -> SurfaceCmd {
         SurfaceCmd::DrawTextRun {
             run: TextRun {
@@ -612,10 +658,11 @@ impl Ide {
 
         // ── tab bar (menus live in the system menu bar) ──
         let ta = self.tab_area();
+        let s = &self.sys;
         cmds.push(SurfaceCmd::FillRect {
             rect: ta,
             corner_radius: 0.0,
-            color: Rgba { r: 0.10, g: 0.11, b: 0.14, a: 1.0 },
+            color: s.chrome_bg,
         });
         let tw = self.tab_width();
         for (i, b) in self.buffers.iter().enumerate() {
@@ -624,13 +671,13 @@ impl Ide {
             cmds.push(SurfaceCmd::FillRect {
                 rect: Rect { x0: x0 + 1.0, y0: ta.y0 + 2.0, x1: x0 + tw - 1.0, y1: ta.y1 },
                 corner_radius: 4.0,
-                color: if active {
-                    Rgba { r: 0.18, g: 0.20, b: 0.26, a: 1.0 }
-                } else {
-                    Rgba { r: 0.12, g: 0.13, b: 0.16, a: 1.0 }
-                },
+                color: if active { s.raised_bg } else { s.sunken_bg },
             });
-            let col = if active { self.theme.fg } else { self.theme.gutter_fg };
+            let col = if active {
+                self.tier(s.text, s.text_secondary)
+            } else {
+                self.tier(s.text_secondary, s.text_tertiary)
+            };
             cmds.push(self.run(Self::tab_label(b), x0 + 8.0, ta.y0 + 4.0, col));
         }
         // `+` button after the last tab — ⌘N/⌘T discoverability.
@@ -638,9 +685,16 @@ impl Ide {
         cmds.push(SurfaceCmd::FillRect {
             rect: Rect { x0: pr.x0, y0: ta.y0 + 2.0, x1: pr.x1, y1: ta.y1 },
             corner_radius: 4.0,
-            color: Rgba { r: 0.12, g: 0.13, b: 0.16, a: 1.0 },
+            color: s.sunken_bg,
         });
-        cmds.push(self.run("+".into(), pr.x0 + 9.0, ta.y0 + 4.0, self.theme.gutter_fg));
+        cmds.push(
+            self.run(
+                "+".into(),
+                pr.x0 + 9.0,
+                ta.y0 + 4.0,
+                self.tier(s.text_secondary, s.text_tertiary),
+            ),
+        );
 
         // ── editor pane ──
         for c in self.ed_mut().render(ea) {
@@ -651,14 +705,17 @@ impl Ide {
         }
 
         // ── status bar ──
+        let s = &self.sys;
         let sa = self.status_area();
         cmds.push(SurfaceCmd::FillRect {
             rect: sa,
             corner_radius: 0.0,
-            color: Rgba { r: 0.16, g: 0.18, b: 0.22, a: 1.0 },
+            color: s.status_bg,
         });
         let status = self.ed().status();
-        cmds.push(self.run(status, sa.x0 + 8.0, sa.y0 + 2.0, self.theme.gutter_fg));
+        cmds.push(
+            self.run(status, sa.x0 + 8.0, sa.y0 + 2.0, self.tier(s.text_secondary, s.text_tertiary)),
+        );
 
         // ── REPL pane ──
         for c in self.repl.render(ra) {
@@ -672,14 +729,17 @@ impl Ide {
         // Doubles as the focus indicator (lit on the focused side). While the
         // user is dragging it, the whole bar lights up to signal it's live,
         // and a short grab handle is drawn centred so it's discoverable.
+        // Inactive windows lose the accent glow entirely.
         let _ = div_y;
-        let dim = Rgba { r: 0.3, g: 0.33, b: 0.4, a: 1.0 };
+        let s = &self.sys;
+        let dim = s.separator;
+        let glow = if self.window_active { s.accent } else { s.separator };
         let (etop, ebot) = if self.dragging_split {
-            (focus_color(), focus_color())
+            (glow, glow)
         } else {
             match self.focus {
-                Focus::Editor => (focus_color(), dim),
-                Focus::Repl => (dim, focus_color()),
+                Focus::Editor => (glow, dim),
+                Focus::Repl => (dim, glow),
             }
         };
         cmds.push(SurfaceCmd::FillRect {
@@ -699,15 +759,10 @@ impl Ide {
         cmds.push(SurfaceCmd::FillRect {
             rect: Rect { x0: cx - hw, y0: div_real - 2.0, x1: cx + hw, y1: div_real + 2.0 },
             corner_radius: 2.0,
-            color: focus_color(),
+            color: glow,
         });
-        let _ = div_y;
         cmds
     }
-}
-
-fn focus_color() -> Rgba {
-    Rgba { r: 0.47, g: 0.78, b: 1.0, a: 1.0 }
 }
 
 #[cfg(test)]
@@ -728,7 +783,7 @@ mod tests {
     #[test]
     fn dragging_the_divider_moves_the_split() {
         use crate::igui_events::mouse_op;
-        let mut ide = Ide::new(Theme::default());
+        let mut ide = Ide::new(fixed_dark());
         ide.set_metrics(8.0, 16.0, 12.0);
         // A render establishes width/height (900×620).
         ide.render(Rect { x0: 0.0, y0: 0.0, x1: 900.0, y1: 620.0 });
@@ -757,7 +812,7 @@ mod tests {
     /// shortcut — same `IdeAction::Eval`, same source.
     #[test]
     fn menu_run_buffer_matches_the_shortcut() {
-        let mut ide = Ide::new(Theme::default());
+        let mut ide = Ide::new(fixed_dark());
         ide.focus = Focus::Editor;
         let via_key = ide.on_key(0x52, modifier::WIN); // Cmd-R
         let via_menu = ide.handle_event(&menu(menu_cmd::RUN_BUFFER));
@@ -779,11 +834,11 @@ mod tests {
             menu_cmd::CLEAR_REPL, menu_cmd::FOCUS_EDITOR, menu_cmd::FOCUS_REPL,
             menu_cmd::HELP,
         ] {
-            let mut ide = Ide::new(Theme::default());
+            let mut ide = Ide::new(fixed_dark());
             let _ = ide.handle_event(&menu(op));
         }
         // Unknown ids no-op instead of misrouting.
-        let mut ide = Ide::new(Theme::default());
+        let mut ide = Ide::new(fixed_dark());
         assert!(matches!(ide.handle_event(&menu(9999)), IdeAction::None));
         // Foreign menus (not menu_cmd::IDE) are ignored.
         let foreign = IGuiEvent::Menu { menu_id: 42, item_id: menu_cmd::SAVE };
@@ -792,7 +847,7 @@ mod tests {
 
     #[test]
     fn menu_new_opens_a_buffer() {
-        let mut ide = Ide::new(Theme::default());
+        let mut ide = Ide::new(fixed_dark());
         let before = ide.buffers.len();
         ide.handle_event(&menu(menu_cmd::NEW));
         assert_eq!(ide.buffers.len(), before + 1);
@@ -802,7 +857,7 @@ mod tests {
     /// char and then picking Undo must leave the buffer as it started.
     #[test]
     fn menu_undo_runs_the_editor_accelerator() {
-        let mut ide = Ide::new(Theme::default());
+        let mut ide = Ide::new(fixed_dark());
         ide.focus = Focus::Editor;
         let before = ide.ed().text();
         ide.ed_mut().on_char('Z' as u32);
@@ -814,7 +869,7 @@ mod tests {
     #[test]
     fn split_is_clamped_so_panes_never_vanish() {
         use crate::igui_events::mouse_op;
-        let mut ide = Ide::new(Theme::default());
+        let mut ide = Ide::new(fixed_dark());
         ide.set_metrics(8.0, 16.0, 12.0);
         ide.render(Rect { x0: 0.0, y0: 0.0, x1: 900.0, y1: 620.0 });
         let div = (ide.height * ide.split).round();
@@ -826,7 +881,7 @@ mod tests {
 
     #[test]
     fn cmd_r_runs_the_buffer() {
-        let mut ide = Ide::new(Theme::default());
+        let mut ide = Ide::new(fixed_dark());
         ide.focus = Focus::Editor;
         match ide.on_key(0x52, modifier::WIN) {
             IdeAction::Eval(src) => assert!(src.contains("defun square")),
@@ -836,7 +891,7 @@ mod tests {
 
     #[test]
     fn repl_return_evaluates() {
-        let mut ide = Ide::new(Theme::default());
+        let mut ide = Ide::new(fixed_dark());
         ide.focus = Focus::Repl;
         for c in "(+ 2 3)".chars() {
             ide.handle_event(&IGuiEvent::Char {
@@ -854,7 +909,7 @@ mod tests {
 
     #[test]
     fn cmd_enter_evals_form_at_point() {
-        let mut ide = Ide::new(Theme::default());
+        let mut ide = Ide::new(fixed_dark());
         ide.focus = Focus::Editor;
         match ide.on_key(vk::RETURN, modifier::WIN) {
             IdeAction::Eval(src) => assert!(src.starts_with('(') && src.contains("defun")),
@@ -864,7 +919,7 @@ mod tests {
 
     #[test]
     fn new_close_and_switch_buffers() {
-        let mut ide = Ide::new(Theme::default());
+        let mut ide = Ide::new(fixed_dark());
         assert_eq!(ide.buffers.len(), 1);
         ide.on_key(0x54, modifier::WIN); // Cmd-T
         assert_eq!(ide.buffers.len(), 2);
@@ -881,7 +936,7 @@ mod tests {
     /// lights, which float over the strip's left end.
     #[test]
     fn tab_strip_clears_traffic_lights() {
-        let mut ide = Ide::new(Theme::default());
+        let mut ide = Ide::new(fixed_dark());
         ide.set_metrics(8.0, 16.0, 12.0);
         ide.on_key(0x54, modifier::WIN); // a second buffer → two chips + plus
         let cmds = ide.render(Rect { x0: 0.0, y0: 0.0, x1: 1000.0, y1: 680.0 });
@@ -921,7 +976,7 @@ mod tests {
     #[test]
     fn plus_button_opens_a_buffer() {
         use crate::igui_events::mouse_op;
-        let mut ide = Ide::new(Theme::default());
+        let mut ide = Ide::new(fixed_dark());
         ide.set_metrics(8.0, 16.0, 12.0);
         ide.render(Rect { x0: 0.0, y0: 0.0, x1: 1000.0, y1: 680.0 });
         let pr = ide.plus_rect();
@@ -937,7 +992,7 @@ mod tests {
     /// directory once a file is loaded, "untitled"/"" before.
     #[test]
     fn title_tracks_active_buffer() {
-        let mut ide = Ide::new(Theme::default());
+        let mut ide = Ide::new(fixed_dark());
         assert_eq!(ide.window_title(), "untitled");
         assert_eq!(ide.window_subtitle(), "");
 
@@ -966,7 +1021,7 @@ mod tests {
     /// title-bar gap above the IDE's chrome).
     #[test]
     fn tab_strip_starts_at_window_top() {
-        let mut ide = Ide::new(Theme::default());
+        let mut ide = Ide::new(fixed_dark());
         ide.set_metrics(8.0, 16.0, 12.0);
         let cmds = ide.render(Rect { x0: 0.0, y0: 0.0, x1: 1000.0, y1: 680.0 });
         let strip = cmds.iter().find_map(|c| match c {
@@ -979,5 +1034,107 @@ mod tests {
         });
         let rect = strip.expect("tab strip background rect");
         assert_eq!(rect.y0, 0.0, "strip must start at the window top edge");
+    }
+
+    // ── Sprint 3: system theme ─────────────────────────────────────────
+
+    /// A forced light vs dark snapshot must change the painted chrome —
+    /// sample the tab strip and the status bar in rendered pixels.
+    #[test]
+    fn forced_theme_changes_frame() {
+        use crate::igui_mac::render::CgCanvas;
+        let paint = |sys: SystemTheme| -> (Vec<u8>, Vec<u8>) {
+            let mut ide = Ide::new(sys);
+            ide.set_metrics(8.0, 16.0, 12.0);
+            let cmds = ide.render(Rect { x0: 0.0, y0: 0.0, x1: 1000.0, y1: 680.0 });
+            let mut canvas = CgCanvas::new(1000, 680);
+            canvas.execute(&cmds);
+            let strip = canvas.pixel(500, 5);
+            let status = canvas.pixel(500, (ide.status_area().y0 as usize
+                + ide.status_area().y1 as usize)
+                / 2);
+            (strip.to_vec(), status.to_vec())
+        };
+        let (dark_strip, dark_status) = paint(fixed_dark());
+        let (light_strip, light_status) = paint(fixed_light());
+        assert_ne!(dark_strip, light_strip, "tab strip must follow appearance");
+        assert_ne!(dark_status, light_status, "status bar must follow appearance");
+    }
+
+    /// Inactive window: labels drop one tier and every accent-coloured
+    /// element (caret, divider glow, grab handle) disappears from the batch.
+    #[test]
+    fn inactive_window_dims_labels_and_hides_accent() {
+        let mut ide = Ide::new(fixed_dark());
+        ide.set_metrics(8.0, 16.0, 12.0);
+        let sys = ide.sys.clone();
+        ide.set_active(false);
+
+        // Active-tab label colour steps down one tier.
+        let cmds = ide.render(Rect { x0: 0.0, y0: 0.0, x1: 1000.0, y1: 680.0 });
+        let tab_label = cmds.iter().find_map(|c| match c {
+            SurfaceCmd::DrawTextRun { run } if run.text == "untitled" => Some(run.color),
+            _ => None,
+        });
+        assert_eq!(tab_label, Some(sys.text_secondary), "active tab dims one tier");
+
+        // No accent anywhere: caret, divider glow, grab handle.
+        for c in &cmds {
+            let color = match c {
+                SurfaceCmd::FillRect { color, .. }
+                | SurfaceCmd::StrokeRect { color, .. }
+                | SurfaceCmd::SelectionRange { color, .. }
+                | SurfaceCmd::Caret { color, .. } => *color,
+                _ => continue,
+            };
+            assert_ne!(
+                color, sys.accent,
+                "accent-coloured element must vanish while inactive: {c:?}"
+            );
+        }
+    }
+
+    /// Text selection follows the accent at the snapshot's alpha — build
+    /// with two accents and the rendered selection tracks each.
+    #[test]
+    fn ide_selection_follows_accent() {
+        let mut a = fixed_dark();
+        a.accent = crate::igui_paint::Rgba { r: 1.0, g: 0.0, b: 0.0, a: 1.0 };
+        a.selection = crate::igui_paint::Rgba { r: 1.0, g: 0.0, b: 0.0, a: 0.28 };
+        let mut b = fixed_dark();
+        b.accent = crate::igui_paint::Rgba { r: 0.0, g: 1.0, b: 0.0, a: 1.0 };
+        b.selection = crate::igui_paint::Rgba { r: 0.0, g: 1.0, b: 0.0, a: 0.28 };
+
+        let sel = |sys: SystemTheme| -> Vec<crate::igui_paint::Rgba> {
+            let mut ide = Ide::new(sys);
+            ide.set_metrics(8.0, 16.0, 12.0);
+            ide.focus = Focus::Editor;
+            ide.on_key(0x41, modifier::WIN); // Cmd-A: select all
+            ide.render(Rect { x0: 0.0, y0: 0.0, x1: 1000.0, y1: 680.0 })
+                .into_iter()
+                .filter_map(|c| match c {
+                    SurfaceCmd::SelectionRange { color, .. } => Some(color),
+                    _ => None,
+                })
+                .collect()
+        };
+        let red = sel(a);
+        let green = sel(b);
+        assert!(!red.is_empty(), "selection rects should render");
+        assert!(red.iter().all(|c| c.r > 0.9 && c.g < 0.1), "red accent: {red:?}");
+        assert!(green.iter().all(|c| c.g > 0.9 && c.r < 0.1), "green accent: {green:?}");
+    }
+
+    /// Chrome colours come from the token snapshot — no ad-hoc color
+    /// literals may appear in this file's render path (tests aside).
+    /// Matches struct literals (`Rgba { r: …`), not `-> Rgba {` signatures.
+    #[test]
+    fn no_chrome_rgba_literals() {
+        let src = include_str!("app.rs");
+        let code = src.split("#[cfg(test)]").next().unwrap();
+        assert!(
+            !code.contains("Rgba { r") && !code.contains("rgb("),
+            "hardcoded chrome color crept back into app.rs"
+        );
     }
 }

@@ -91,6 +91,19 @@ pub struct Theme {
     pub c_comment: Rgba,
     pub c_paren: Rgba,
     pub c_quote: Rgba,
+    // REPL transcript colors + prompt.
+    pub prompt: Rgba,
+    pub repl_input: Rgba,
+    pub repl_output: Rgba,
+    pub repl_error: Rgba,
+    pub repl_info: Rgba,
+    // Incremental-search highlight + bar.
+    pub search_current: Rgba,
+    pub search_match: Rgba,
+    pub search_bar_bg: Rgba,
+    /// Whether the caret is drawn. Hidden when the window is inactive
+    /// (macOS hides text carets in background windows).
+    pub show_caret: bool,
 }
 
 #[inline]
@@ -119,6 +132,15 @@ impl Default for Theme {
             c_comment: rgb(110, 120, 135), // grey — comments
             c_paren: rgb(140, 150, 168),   // dim — brackets
             c_quote: rgb(238, 153, 160),   // pink — quotes
+            prompt: rgb(148, 210, 189),    // teal — the λ> prompt
+            repl_input: rgb(168, 218, 255),
+            repl_output: rgb(220, 223, 228),
+            repl_error: rgb(231, 111, 81),
+            repl_info: rgb(148, 210, 189),
+            search_current: Rgba { r: 0.95, g: 0.75, b: 0.2, a: 0.55 },
+            search_match: Rgba { r: 0.5, g: 0.5, b: 0.3, a: 0.30 },
+            search_bar_bg: rgb(30, 32, 40),
+            show_caret: true,
         }
     }
 }
@@ -315,6 +337,10 @@ impl Editor {
     }
     pub fn set_theme(&mut self, t: Theme) {
         self.theme = t;
+    }
+    /// Show/hide the caret (hidden while the window is inactive).
+    pub fn set_show_caret(&mut self, v: bool) {
+        self.theme.show_caret = v;
     }
     /// Set measured monospace metrics (from Core Text).
     pub fn set_metrics(&mut self, cell_w: f32, cell_h: f32, ascent: f32) {
@@ -1592,11 +1618,8 @@ impl Editor {
                 if r >= self.scroll_top && r < self.scroll_top + self.visible_rows {
                     let my = area.y0 + (r - self.scroll_top) as f32 * cell_h;
                     let mx = text_x0 + c as f32 * cell_w;
-                    let color = if mi == s.idx {
-                        Rgba { r: 0.95, g: 0.75, b: 0.2, a: 0.55 }
-                    } else {
-                        Rgba { r: 0.5, g: 0.5, b: 0.3, a: 0.30 }
-                    };
+                    let color =
+                        if mi == s.idx { t.search_current } else { t.search_match };
                     cmds.push(SurfaceCmd::SelectionRange {
                         rect: Rect { x0: mx, y0: my, x1: mx + qlen * cell_w, y1: my + cell_h },
                         color,
@@ -1607,7 +1630,7 @@ impl Editor {
             cmds.push(SurfaceCmd::FillRect {
                 rect: Rect { x0: area.x0, y0: bar_y, x1: area.x1, y1: area.y1 },
                 corner_radius: 0.0,
-                color: Rgba { r: 0.12, g: 0.13, b: 0.16, a: 1.0 },
+                color: t.search_bar_bg,
             });
             let total = s.matches.len();
             let cur = if total == 0 { 0 } else { s.idx + 1 };
@@ -1619,8 +1642,11 @@ impl Editor {
             ));
         }
 
-        // Caret.
-        if cur_row >= self.scroll_top && cur_row < self.scroll_top + self.visible_rows {
+        // Caret (hidden while the window is inactive).
+        if t.show_caret
+            && cur_row >= self.scroll_top
+            && cur_row < self.scroll_top + self.visible_rows
+        {
             let cy = area.y0 + (cur_row - self.scroll_top) as f32 * cell_h;
             let cx = text_x0 + cur_col as f32 * cell_w;
             cmds.push(SurfaceCmd::Caret {

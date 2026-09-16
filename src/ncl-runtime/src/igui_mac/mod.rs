@@ -22,6 +22,9 @@ pub mod ide;
 /// pure data and always built/tested; the AppKit half is `mac-gui`.
 pub mod menu;
 pub mod render;
+/// Semantic color tokens (light/dark + accent) for the IDE chrome. Pure
+/// data + swap slot always built; NSColor resolution is `mac-gui`.
+pub mod theme;
 /// Native Lisp shims that let Lisp drive the Cocoa side windows (open-child,
 /// the batch/`%emit-*` drawing primitives, next-event). Opt-in (`mac-gui`).
 #[cfg(feature = "mac-gui")]

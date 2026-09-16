@@ -138,7 +138,7 @@ fn main() -> ExitCode {
 #[cfg(all(target_os = "macos", feature = "mac-gui"))]
 fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
     use ncl_runtime::igui_events::{self, IGuiEvent};
-    use ncl_runtime::igui_mac::ide::{Ide, IdeAction, Theme};
+    use ncl_runtime::igui_mac::ide::{Ide, IdeAction};
     use ncl_runtime::igui_mac::render::CgCanvas;
     use ncl_runtime::igui_mac::window;
     use ncl_runtime::igui_paint::{
@@ -176,10 +176,25 @@ fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
         // The IDE render area. Tracks the live window size — updated when a
         // Resize event for the main window arrives (see the central loop).
         let mut area = Rect { x0: 0.0, y0: 0.0, x1: W as f32, y1: H as f32 };
-        let theme = Theme::default();
+        // The semantic theme snapshot (resolved on the main thread before
+        // this worker starts; re-resolved on appearance/accent changes).
+        let sys = ncl_runtime::igui_mac::theme::current();
+        let theme = sys.to_editor_theme();
         let (cw, ch, asc) = metrics(&theme.family, theme.size);
-        let mut ide = Ide::new(theme);
+        let mut ide = Ide::new((*sys).clone());
         ide.set_metrics(cw, ch, asc);
+        // Test hook: pin the key-window state so dimming can be verified
+        // headlessly (unset → follow Focus events from the real window).
+        let forced_active = std::env::var("NCL_GUI_FAKE_KEY_WINDOW").ok().and_then(|v| {
+            match v.as_str() {
+                "0" => Some(false),
+                "1" => Some(true),
+                _ => None,
+            }
+        });
+        if let Some(a) = forced_active {
+            ide.set_active(a);
+        }
         ide.info("Booting NCL standard library…");
         window::present_main(ide.render(area));
 
@@ -401,6 +416,20 @@ fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
             if let IGuiEvent::Resize { child_id, width, height } = &ev {
                 if *child_id == window::MAIN_ID {
                     area = Rect { x0: 0.0, y0: 0.0, x1: *width as f32, y1: *height as f32 };
+                }
+            }
+
+            // Appearance/accent changed on the system: adopt the fresh
+            // snapshot the main thread published.
+            if matches!(&ev, IGuiEvent::ThemeChange) {
+                ide.set_theme((*ncl_runtime::igui_mac::theme::current()).clone());
+            }
+
+            // Key-window state drives inactive-window dimming (unless the
+            // NCL_GUI_FAKE_KEY_WINDOW test hook pinned it).
+            if let IGuiEvent::Focus { child_id, gained } = &ev {
+                if *child_id == window::MAIN_ID && forced_active.is_none() {
+                    ide.set_active(*gained);
                 }
             }
 
