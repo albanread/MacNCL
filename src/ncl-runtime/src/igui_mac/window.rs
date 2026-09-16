@@ -29,7 +29,8 @@ use objc2::MainThreadMarker;
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent, NSEventMask,
     NSEventType, NSImage, NSImageScaling, NSImageView, NSPasteboardType, NSPasteboardTypeFileURL,
-    NSAutoresizingMaskOptions, NSCursor, NSView, NSWindow, NSWindowStyleMask, NSWorkspace,
+    NSAutoresizingMaskOptions, NSCursor, NSView, NSWindow, NSWindowTitleVisibility,
+    NSWindowStyleMask, NSWorkspace,
 };
 
 use crate::igui_mac::anim::{cursor_shape_for, CursorHints, CursorShape};
@@ -315,8 +316,13 @@ impl WindowManager {
         if is_main {
             // Transparent title bar: the full-size content shows through
             // where the (now invisible) title bar would be; only the
-            // traffic lights remain, floating over the tab strip.
+            // traffic lights remain, floating over the tab strip. The
+            // title TEXT must be hidden too — `titlebarAppearsTransparent`
+            // alone only clears the background, so the window title would
+            // still be drawn over the strip, duplicating the active tab's
+            // label. (Xcode does exactly this.)
             unsafe { window.setTitlebarAppearsTransparent(true) };
+            window.setTitleVisibility(NSWindowTitleVisibility::Hidden);
             // Remember position/size across launches. Setting the name
             // restores a previously saved frame and returns false when
             // there is none — only then do we centre a first launch.
