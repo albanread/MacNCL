@@ -145,8 +145,10 @@ fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
         FontStretch, FontStyle, Point, Rect, Rgba, TextAlign, TextRun, TextTrimming,
     };
 
-    const W: f64 = 900.0;
-    const H: f64 = 620.0;
+    // Default IDE window size (points). The window remembers its frame
+    // across launches (autosave); this is the first-launch size.
+    const W: f64 = 1000.0;
+    const H: f64 = 680.0;
 
     // Measure the monospace cell for a family/size via Core Text.
     fn metrics(family: &str, size: f32) -> (f32, f32, f32) {
@@ -375,6 +377,11 @@ fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
         // thread only ever posts into the mailbox, so it never blocks here.
         igui_events::clear_filter();
 
+        // Last title/subtitle posted to the window, so we only send a
+        // command when the active buffer actually changes identity.
+        let mut last_title = "MacNCL — REPL".to_string();
+        let mut last_subtitle = String::new();
+
         loop {
             let Some(ev) = igui_events::next_event(-1) else {
                 break; // mailbox closed — process shutting down
@@ -432,6 +439,18 @@ fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
                     // active buffer's dirty flag (read by validateMenuItem:
                     // when the menu opens).
                     ncl_runtime::igui_mac::menu::set_save_enabled(ide.can_save());
+                    // Window title/subtitle track the active buffer; posted
+                    // only on change so tab switches don't spam the queue.
+                    let want_title = ide.window_title();
+                    if want_title != last_title {
+                        window::set_window_title(window::MAIN_ID, &want_title);
+                        last_title = want_title;
+                    }
+                    let want_subtitle = ide.window_subtitle();
+                    if want_subtitle != last_subtitle {
+                        window::set_window_subtitle(window::MAIN_ID, &want_subtitle);
+                        last_subtitle = want_subtitle;
+                    }
                     window::present_main(ide.render(area));
                 }
             }

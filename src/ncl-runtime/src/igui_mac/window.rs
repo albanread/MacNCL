@@ -48,6 +48,7 @@ enum UiCmd {
     Open { id: i64, w: f64, h: f64, title: String },
     Close { id: i64 },
     Title { id: i64, title: String },
+    Subtitle { id: i64, subtitle: String },
 }
 
 fn cmd_queue() -> &'static Mutex<VecDeque<UiCmd>> {
@@ -69,6 +70,12 @@ pub fn close_window(id: i64) {
 }
 pub fn set_window_title(id: i64, title: &str) {
     post(UiCmd::Title { id, title: title.to_string() });
+}
+
+/// Set the window's subtitle (shown in window lists; the IDE uses it for
+/// the active buffer's directory). Worker-callable.
+pub fn set_window_subtitle(id: i64, subtitle: &str) {
+    post(UiCmd::Subtitle { id, subtitle: subtitle.to_string() });
 }
 
 // ── Per-window redraw timers (`set-redraw-rate`) ───────────────────────
@@ -184,10 +191,18 @@ impl WindowManager {
         }
         let mtm = self.mtm;
         let rect = NSRect::new(NSPoint::new(0.0, 0.0), NSSize::new(w, h));
-        let style = NSWindowStyleMask::Titled
+        let is_main = id == MAIN_ID;
+        let mut style = NSWindowStyleMask::Titled
             | NSWindowStyleMask::Closable
             | NSWindowStyleMask::Miniaturizable
             | NSWindowStyleMask::Resizable;
+        // The IDE draws its own chrome right up to the top of the window
+        // (tab strip under the traffic lights, Xcode-style). Child windows
+        // keep the standard title bar — they draw arbitrary content that
+        // must not slide under the lights.
+        if is_main {
+            style |= NSWindowStyleMask::FullSizeContentView;
+        }
         let window = unsafe {
             NSWindow::initWithContentRect_styleMask_backing_defer(
                 mtm.alloc::<NSWindow>(),
@@ -198,7 +213,21 @@ impl WindowManager {
             )
         };
         window.setTitle(&NSString::from_str(title));
-        window.center();
+        if is_main {
+            // Transparent title bar: the full-size content shows through
+            // where the (now invisible) title bar would be; only the
+            // traffic lights remain, floating over the tab strip.
+            unsafe { window.setTitlebarAppearsTransparent(true) };
+            // Remember position/size across launches. Setting the name
+            // restores a previously saved frame and returns false when
+            // there is none — only then do we centre a first launch.
+            let restored =
+                unsafe { window.setFrameAutosaveName(&NSString::from_str("MacNCL-IDE")) };
+            if !restored {
+                window.center();
+            }
+            window.setMinSize(NSSize::new(720.0, 480.0));
+        }
         // CRITICAL: programmatically created NSWindows default to
         // `releasedWhenClosed = YES`, so AppKit releases the window when it
         // closes. We also hold a `Retained` to it in `WinEntry`, so that
@@ -255,6 +284,12 @@ impl WindowManager {
     fn set_title(&mut self, id: i64, title: &str) {
         if let Some(e) = self.wins.get(&id) {
             e.window.setTitle(&NSString::from_str(title));
+        }
+    }
+
+    fn set_subtitle(&mut self, id: i64, subtitle: &str) {
+        if let Some(e) = self.wins.get(&id) {
+            e.window.setSubtitle(&NSString::from_str(subtitle));
         }
     }
 
@@ -349,6 +384,7 @@ impl WindowManager {
                 UiCmd::Open { id, w, h, title } => self.open(id, w, h, &title),
                 UiCmd::Close { id } => self.close(id),
                 UiCmd::Title { id, title } => self.set_title(id, &title),
+                UiCmd::Subtitle { id, subtitle } => self.set_subtitle(id, &subtitle),
             }
         }
     }

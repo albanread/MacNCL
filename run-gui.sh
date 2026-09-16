@@ -12,6 +12,8 @@
 #   ./run-gui.sh --app  othello-gui run that demo standalone — no IDE chrome,
 #                                   quits when its window closes (--run-window)
 #   ./run-gui.sh --no-build         skip the build, run the existing binary
+#   ./run-gui.sh --no-bundle        run the bare binary instead of MacNCL.app
+#                                   (no Dock icon / About panel / file types)
 #   ./run-gui.sh -- <extra args>    pass everything after -- straight to ncl
 #
 # --demo/--app NAME loads Lisp/demos/NAME.lisp and calls (run-NAME).
@@ -39,6 +41,7 @@ usage() { sed -n '3,18p' "$0" | sed 's/^# \{0,1\}//'; }
 profile="debug"
 profile_flag=()
 do_build=1
+do_bundle=1
 lean=()
 evals=()
 demo=""
@@ -49,6 +52,7 @@ while [ $# -gt 0 ]; do
   case "$1" in
     --release)   profile="release"; profile_flag=(--release); shift ;;
     --no-build)  do_build=0; shift ;;
+    --no-bundle) do_bundle=0; shift ;;
     --lean)      lean=(--lean); shift ;;
     --eval)      [ $# -ge 2 ] || { echo "run-gui: --eval needs a form" >&2; exit 2; }
                  evals+=(--eval "$2"); shift 2 ;;
@@ -95,6 +99,22 @@ else
 fi
 
 args+=("${passthru[@]}")
+
+# Assemble a proper .app bundle so the Dock shows the λ icon, the app menu
+# says "About MacNCL", and .lisp files can be associated with us.
+app="$repo/build/MacNCL.app"
+if [ "$do_bundle" -eq 1 ] && [ -f "$repo/resources/Info.plist" ] \
+   && [ -f "$repo/resources/AppIcon.icns" ]; then
+  mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
+  cp "$bin" "$app/Contents/MacOS/ncl"
+  cp "$repo/resources/Info.plist" "$app/Contents/Info.plist"
+  cp "$repo/resources/AppIcon.icns" "$app/Contents/Resources/AppIcon.icns"
+  # Refresh the registration so Finder/LaunchServices see the current icon.
+  /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
+    -f "$app" >/dev/null 2>&1 || true
+  echo "[run-gui] open $app ${args[*]}"
+  exec open "$app" --args "${args[@]}"
+fi
 
 echo "[run-gui] $bin ${args[*]}"
 exec "$bin" "${args[@]}"

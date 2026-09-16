@@ -128,6 +128,12 @@ const SPLIT_GRAB: f32 = 5.0;
 /// Clamp the split so neither pane can be dragged shut.
 const SPLIT_MIN: f32 = 0.12;
 const SPLIT_MAX: f32 = 0.90;
+/// Left inset of the tab strip: the traffic lights float over the strip
+/// (FullSizeContentView + transparent title bar), so the first tab must
+/// start clear of them. ~78pt covers the three buttons at standard width.
+pub const TRAFFIC_INSET: f32 = 78.0;
+/// Width of the `+` (new buffer) button that follows the last tab.
+const PLUS_W: f32 = 28.0;
 
 impl Ide {
     pub fn new(theme: Theme) -> Self {
@@ -257,7 +263,35 @@ impl Ide {
         Rect { x0: 0.0, y0: div + 1.0, x1: self.width, y1: self.height }
     }
     fn tab_width(&self) -> f32 {
-        (self.width / self.buffers.len() as f32).min(200.0).max(60.0)
+        ((self.width - TRAFFIC_INSET) / self.buffers.len() as f32).min(200.0).max(60.0)
+    }
+
+    /// Rect of the `+` (new buffer) button that follows the last tab.
+    fn plus_rect(&self) -> Rect {
+        let x0 = TRAFFIC_INSET + self.buffers.len() as f32 * self.tab_width() + 4.0;
+        Rect { x0, y0: 0.0, x1: x0 + PLUS_W, y1: self.tab_h() }
+    }
+
+    /// What the NSWindow title should show: the active buffer's file name,
+    /// or "untitled". (The visible identity is the active tab; this feeds
+    /// the Window menu / Mission Control / ⌘-switcher.)
+    pub fn window_title(&self) -> String {
+        self.ed()
+            .file_path()
+            .map(|p| p.rsplit('/').next().unwrap_or(p).to_string())
+            .unwrap_or_else(|| "untitled".into())
+    }
+
+    /// What the NSWindow subtitle should show: the active buffer's
+    /// directory, or "" for untitled buffers.
+    pub fn window_subtitle(&self) -> String {
+        self.ed()
+            .file_path()
+            .and_then(|p| {
+                let dir = p.rsplit_once('/').map(|(d, _)| d)?;
+                (!dir.is_empty()).then(|| dir.to_string())
+            })
+            .unwrap_or_default()
     }
 
     /// Whether the menu's Save item should be enabled (active buffer dirty).
@@ -429,10 +463,18 @@ impl Ide {
                     return IdeAction::None;
                 }
 
-                // Tab-bar click switches buffers.
+                // Tab-bar clicks: the `+` button opens a buffer; a tab
+                // switches to it. (Tabs start right of the traffic lights.)
                 if down && my < self.header_h() {
-                    let i = (mx / self.tab_width()) as usize;
-                    self.switch_to(i);
+                    let pr = self.plus_rect();
+                    if mx >= pr.x0 && mx < pr.x1 {
+                        self.new_buffer();
+                        return IdeAction::None;
+                    }
+                    if mx >= TRAFFIC_INSET {
+                        let i = ((mx - TRAFFIC_INSET) / self.tab_width()) as usize;
+                        self.switch_to(i);
+                    }
                     return IdeAction::None;
                 }
                 if down {
@@ -577,7 +619,7 @@ impl Ide {
         });
         let tw = self.tab_width();
         for (i, b) in self.buffers.iter().enumerate() {
-            let x0 = i as f32 * tw;
+            let x0 = TRAFFIC_INSET + i as f32 * tw;
             let active = i == self.active;
             cmds.push(SurfaceCmd::FillRect {
                 rect: Rect { x0: x0 + 1.0, y0: ta.y0 + 2.0, x1: x0 + tw - 1.0, y1: ta.y1 },
@@ -591,6 +633,14 @@ impl Ide {
             let col = if active { self.theme.fg } else { self.theme.gutter_fg };
             cmds.push(self.run(Self::tab_label(b), x0 + 8.0, ta.y0 + 4.0, col));
         }
+        // `+` button after the last tab — ⌘N/⌘T discoverability.
+        let pr = self.plus_rect();
+        cmds.push(SurfaceCmd::FillRect {
+            rect: Rect { x0: pr.x0, y0: ta.y0 + 2.0, x1: pr.x1, y1: ta.y1 },
+            corner_radius: 4.0,
+            color: Rgba { r: 0.12, g: 0.13, b: 0.16, a: 1.0 },
+        });
+        cmds.push(self.run("+".into(), pr.x0 + 9.0, ta.y0 + 4.0, self.theme.gutter_fg));
 
         // ── editor pane ──
         for c in self.ed_mut().render(ea) {
@@ -823,5 +873,111 @@ mod tests {
         assert_eq!(ide.active, 0);
         ide.on_key(0x57, modifier::WIN); // Cmd-W close active
         assert_eq!(ide.buffers.len(), 1);
+    }
+
+    // ── Sprint 2: window polish ─────────────────────────────────────────
+
+    /// The first tab and the `+` button must start clear of the traffic
+    /// lights, which float over the strip's left end.
+    #[test]
+    fn tab_strip_clears_traffic_lights() {
+        let mut ide = Ide::new(Theme::default());
+        ide.set_metrics(8.0, 16.0, 12.0);
+        ide.on_key(0x54, modifier::WIN); // a second buffer → two chips + plus
+        let cmds = ide.render(Rect { x0: 0.0, y0: 0.0, x1: 1000.0, y1: 680.0 });
+
+        // Every tab chip / `+` chip lives in the strip (y within tab_h) and
+        // starts at or right of the inset. Collect the chip rects from the
+        // rendered FillRects in the strip band.
+        let strip_bottom = ide.tab_h();
+        let mut chips = Vec::new();
+        for c in &cmds {
+            if let SurfaceCmd::FillRect { rect, .. } = c {
+                if rect.y0 < strip_bottom && rect.y1 <= strip_bottom && rect.x1 - rect.x0 < 300.0
+                {
+                    chips.push((rect.x0, rect.x1));
+                }
+            }
+        }
+        assert!(chips.len() >= 3, "expected two tabs + plus chip, got {chips:?}");
+        for (x0, x1) in &chips {
+            assert!(
+                *x0 >= TRAFFIC_INSET,
+                "chip at x0={x0} overlaps the traffic lights (< {TRAFFIC_INSET})"
+            );
+            assert!(*x1 <= 1000.0);
+        }
+        // The strip background itself spans the full width (drawn under the
+        // lights so the chrome looks continuous).
+        assert!(cmds.iter().any(|c| matches!(
+            c,
+            SurfaceCmd::FillRect { rect, .. }
+                if rect.y0 == 0.0 && rect.x0 == 0.0 && rect.x1 == 1000.0
+        )));
+    }
+
+    /// Clicking the `+` chip opens a buffer; clicks left of the inset (where
+    /// the traffic lights are) never hit a tab.
+    #[test]
+    fn plus_button_opens_a_buffer() {
+        use crate::igui_events::mouse_op;
+        let mut ide = Ide::new(Theme::default());
+        ide.set_metrics(8.0, 16.0, 12.0);
+        ide.render(Rect { x0: 0.0, y0: 0.0, x1: 1000.0, y1: 680.0 });
+        let pr = ide.plus_rect();
+        let before = ide.buffers.len();
+        ide.handle_event(&mouse(mouse_op::LEFT_DOWN, (pr.x0 + pr.x1) / 2.0, 5.0));
+        assert_eq!(ide.buffers.len(), before + 1, "+ click should open a buffer");
+        // A click in the traffic-light zone does nothing pane-visible.
+        ide.handle_event(&mouse(mouse_op::LEFT_DOWN, 20.0, 5.0));
+        assert_eq!(ide.buffers.len(), before + 1);
+    }
+
+    /// The window title/subtitle track the active buffer: filename and
+    /// directory once a file is loaded, "untitled"/"" before.
+    #[test]
+    fn title_tracks_active_buffer() {
+        let mut ide = Ide::new(Theme::default());
+        assert_eq!(ide.window_title(), "untitled");
+        assert_eq!(ide.window_subtitle(), "");
+
+        // Load a file into the scratch buffer (untitled + clean → reused).
+        let dir = std::env::temp_dir().join("ncl_title_test.lisp");
+        std::fs::write(&dir, "(+ 1 2)\n").unwrap();
+        ide.load_file(dir.to_str().unwrap());
+        assert_eq!(ide.window_title(), "ncl_title_test.lisp");
+        assert_eq!(
+            ide.window_subtitle(),
+            dir.parent().unwrap().to_str().unwrap(),
+            "subtitle should be the file's directory"
+        );
+
+        // A second (new) buffer takes over the identity; switching back
+        // restores it.
+        ide.on_key(0x54, modifier::WIN); // Cmd-T
+        assert_eq!(ide.window_title(), "untitled");
+        ide.on_key(0x31, modifier::WIN); // Cmd-1 → file buffer
+        assert_eq!(ide.window_title(), "ncl_title_test.lisp");
+        let _ = std::fs::remove_file(&dir);
+    }
+
+    /// Full-size content means the batch starts at the very top of the
+    /// window: the strip's background rect must begin at y = 0 (no
+    /// title-bar gap above the IDE's chrome).
+    #[test]
+    fn tab_strip_starts_at_window_top() {
+        let mut ide = Ide::new(Theme::default());
+        ide.set_metrics(8.0, 16.0, 12.0);
+        let cmds = ide.render(Rect { x0: 0.0, y0: 0.0, x1: 1000.0, y1: 680.0 });
+        let strip = cmds.iter().find_map(|c| match c {
+            SurfaceCmd::FillRect { rect, .. }
+                if rect.x0 == 0.0 && rect.x1 == 1000.0 && rect.y1 == ide.tab_h() =>
+            {
+                Some(*rect)
+            }
+            _ => None,
+        });
+        let rect = strip.expect("tab strip background rect");
+        assert_eq!(rect.y0, 0.0, "strip must start at the window top edge");
     }
 }
