@@ -11,10 +11,9 @@
 ;;;; gives us a single deterministic event loop.
 ;;;;
 ;;;; Run:
-;;;;   ncl --load Lisp/demos/heap-monitor.lisp --eval "(run-heap-monitor)"
-;;;;
-;;;; or via:
-;;;;   ./tools/Start-Gui.ps1 -Demo heap-monitor
+;;;;   ./run-gui.sh --demo heap-monitor
+;;;; or directly:
+;;;;   ncl --windows --load Lisp/demos/heap-monitor.lisp --eval "(run-heap-monitor)"
 
 (defparameter +bg+         (rgb 18 22 30))
 (defparameter +bar-frame+  (rgb 60 65 75))
@@ -72,9 +71,7 @@
        ;; 250 ms tick = 4 Hz refresh. iGui coalesces backed-up
        ;; ticks so the language thread only sees one per drain.
        (set-redraw-rate id 250)
-       (event-loop-for id
-         (:frame-close (return :done))
-         (:close       (return :done))
+       (on-window id
          (:tick        (paint-monitor id))
          (:resize      (paint-monitor id))
          (t            nil))))))   ; ignore mouse/focus/keys etc.

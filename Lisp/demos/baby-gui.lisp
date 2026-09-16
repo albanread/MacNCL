@@ -254,8 +254,6 @@
      (text-clear   *baby-id*)
      (write-banner)
      (write-prompt)
-     (event-loop-for *baby-id*
-       (:frame-close (return :done))
-       (:close       (return :done))
+     (on-window *baby-id*
        (:char        (unless (handle-char (getf ev :char))
-                       (return :done)))))))
+                       (stop-pane *baby-id*)))))))

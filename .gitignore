@@ -24,7 +24,36 @@ ncl-stderr*.txt
 # canonical; the cache can be deleted at any time without loss.
 /.ncl-cache/
 
-# Compiled binaries are never source. doc-crate.exe is a build artifact
-# of crates/doc-crate (cargo build --release -p doc-crate); Test-Render.ps1
-# expects a copy beside it. Keep it out of git like everything in /release/.
-/tools/_verify/doc-crate.exe
+# macOS
+.DS_Store
+
+# Windows-only material — removed in the Mac fork; keep it out.
+/tools/
+/scripts/
+/packs/
+*.bat
+*.ps1
+/Lisp/Library/win32*.lisp
+
+# Binaries, libraries, and archives — never source.
+*.exe
+*.dll
+*.dylib
+*.so
+*.a
+*.lib
+*.o
+*.obj
+*.pdb
+*.pack
+*.zip
+*.tar
+*.tgz
+*.7z
+*.dmg
+
+# GUI debug frame dumps (NCL_IGUI_DUMP=frame.ppm).
+*.ppm
+
+# Editor scratch.
+/scratchpad

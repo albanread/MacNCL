@@ -584,9 +584,7 @@
        (setq *controller* (create-controller))
        (render-controller *controller* id)
        (set-redraw-rate id 16)            ; ~60 fps tick
-       (event-loop-for id
-         (:frame-close (return :done))
-         (:close       (return :done))
+       (on-window id
          (:resize      (setq *width*  (max (getf ev :width) 1))
                        (setq *height* (max (getf ev :height) 1)))
          (:tick        (unless *paused*
@@ -595,7 +593,7 @@
          (:char
           (let ((ch (getf ev :char)))
             (cond
-              ((or (eql ch #\q) (eql ch #\Q)) (return :done))
+              ((or (eql ch #\q) (eql ch #\Q)) (stop-pane id))
               ((or (eql ch #\r) (eql ch #\R))
                (setq *controller* (create-controller))
                (render-controller *controller* id))

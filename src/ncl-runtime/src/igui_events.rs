@@ -181,6 +181,18 @@ pub enum IGuiEvent {
     },
 }
 
+impl IGuiEvent {
+    /// The window this event targets, or `None` for a *global* event
+    /// (`FrameClose`, `ThemeChange`, `Menu`, `EvalBuffer`) that isn't
+    /// bound to any one child. The central dispatcher uses this to route
+    /// per-child events to the owning pane's handler and to broadcast
+    /// globals. Mirror of the private `event_target` used by the
+    /// dispatcher thread, but public for the host's cooperative loop.
+    pub fn child_id(&self) -> Option<i64> {
+        event_target(self)
+    }
+}
+
 // ── Per-child queue ──────────────────────────────────────────────────────────
 
 /// Sentinel child_id for the catch-all queue. Language threads that use
@@ -368,6 +380,19 @@ fn dispatcher(rx: Receiver<IGuiEvent>) {
                 }
             }
         };
+
+        if std::env::var_os("NCL_GUI_DEBUG").is_some()
+            && !matches!(ev, IGuiEvent::Tick { .. })
+        {
+            let kind = match &ev {
+                IGuiEvent::Mouse { op, .. } => format!("Mouse(op={op})"),
+                other => format!("{other:?}").chars().take(16).collect(),
+            };
+            eprintln!(
+                "[disp] {kind} target={target:?} -> {} queue(s)",
+                targets.len()
+            );
+        }
 
         // Push the event to every target queue. All but the last need a clone.
         let n = targets.len();

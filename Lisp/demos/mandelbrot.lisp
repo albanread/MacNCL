@@ -98,6 +98,4 @@
             (render-mandelbrot base w h max)
             (canvas-present id)
             (format t "done — close the window to exit.~%")
-            (event-loop-for id
-              (:frame-close (return :done))
-              (:close       (return :done))))))))))
+            (on-window id))))))))

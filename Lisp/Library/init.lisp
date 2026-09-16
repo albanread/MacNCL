@@ -42,18 +42,6 @@
 (require 'events)                        ; iGui event-loop / with-events-from
 (require 'hot-reload)                    ; (start-hot-reload), (check-reloads)
 
-;;; Windows FFI surface (docs/WINDOWS_FFI.md). Only meaningful when
-;;; the driver was started with --windows; we still load the
-;;; threading shim either way so user code that uses (on-ui-thread …)
-;;; gets a clear error if the surface is off, rather than an
-;;; "unbound function" mystery. The conditional guards the Win32
-;;; binding modules — those are deferred to per-namespace require.
-(when (windows-enabled-p)
-  (require 'win32-threading)            ; (on-ui-thread …), (post-to-ui-thread …)
-  (require 'win32-buffer)               ; foreign buffers + defstruct-win32
-  (require 'win32)                      ; (win32 …), (defwin32 …)
-  (require 'win32-callback))            ; define-win32-callback for WNDPROC etc.
-
 ;;; Example user-side hook: load a personal utilities module if
 ;;; present. Uncomment and rename to taste.
 ;; (require 'my-utils)

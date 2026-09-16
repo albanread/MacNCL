@@ -181,9 +181,7 @@
        (paint id)
        ;; 100 ms tick to match the corman demo's *refresh-milliseconds*.
        (set-redraw-rate id 100)
-       (event-loop-for id
-         (:frame-close (return :done))
-         (:close       (return :done))
+       (on-window id
          (:resize      (setq *win-w* (max (getf ev :width)  1))
                        (setq *win-h* (max (getf ev :height) 1)))
          (:tick        (unless *paused* (advance-board))

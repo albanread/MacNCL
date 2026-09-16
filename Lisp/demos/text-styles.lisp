@@ -37,7 +37,5 @@
   (igui-start)
   (let ((id (open-child "text styles")))
     (paint-styles id 600 320)
-    (event-loop-for id
-      (:frame-close (return :done))
-      (:close       (close-child id) (return :done))
+    (on-window id
       (:resize      (paint-styles id (getf ev :width) (getf ev :height))))))

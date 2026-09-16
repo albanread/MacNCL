@@ -19,7 +19,5 @@
     ;; Park briefly so the window is visible. We don't enter a
     ;; full event-loop here because that would block the outer
     ;; eval-buffer handler. The user closes the window from the X.
-    (event-loop-for id
-      (:frame-close (return :done))
-      (:close       (return :done))
+    (on-window id
       (:tick        nil))))

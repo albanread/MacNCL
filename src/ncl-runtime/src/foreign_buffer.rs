@@ -1,11 +1,9 @@
-//! Foreign buffer primitives for the Windows FFI. Phase 5 of
-//! `docs/WINDOWS_FFI.md`.
+//! Foreign (malloc-backed) memory buffers — platform-neutral.
 //!
-//! Win32 record types (RECT, POINT, MSG, WNDCLASSEXW, PAINTSTRUCT,
-//! …) get passed by pointer. The standard C idiom is "caller
-//! allocates, callee fills in (or reads)". Lisp can't malloc / read
-//! / write arbitrary memory natively — those are the missing
-//! primitives this file provides.
+//! Lisp can't malloc / read / write arbitrary memory natively; these
+//! primitives provide that. The canvas pixel-poke demos use them to build a
+//! framebuffer (`make-foreign-buffer` + `buffer-set-u32`), and they're a
+//! general escape hatch for any code that needs raw bytes.
 //!
 //! Surface
 //! ───────
@@ -33,10 +31,6 @@
 //! code dereference any pointer and write any value. That's the
 //! point: they're the bridge between Lisp's safe world and the C
 //! ABI. Mistakes here are debugging puzzles, not type errors.
-//!
-//! The `defstruct-win32` macro (Lisp/Library/win32-buffer.lisp)
-//! layers offset/size discipline on top so user code doesn't have
-//! to hand-write offsets.
 
 use std::alloc::{alloc_zeroed, dealloc, Layout};
 

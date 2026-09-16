@@ -66,9 +66,7 @@
        ;; Banner in the log.
        (paint-and-log-banner log)
        (let ((count 0))
-         (event-loop-for canvas
-           (:frame-close (return :done))
-           (:close       (close-child canvas) (return :done))
+         (on-window canvas
            (:mouse
             (when (eq (getf ev :op) :LEFT-DOWN)
               (setq count (+ count 1))

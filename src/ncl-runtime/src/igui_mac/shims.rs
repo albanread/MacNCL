@@ -202,8 +202,9 @@ pub extern "C-unwind" fn set_title_shim(
 }
 
 /// `(set-redraw-rate child-id ms)` — schedule `:TICK` events for the child
-/// every `ms` milliseconds. Spawns a timer thread that posts ticks into the
-/// mailbox.
+/// every `ms` milliseconds. The timer is owned by `igui_mac::window`, which
+/// stops it when the window closes (so it doesn't leak a tick thread).
+/// `ms <= 0` cancels any existing timer.
 pub extern "C-unwind" fn set_redraw_rate_shim(
     _m: *mut MutatorState,
     _e: u64,
@@ -216,19 +217,7 @@ pub extern "C-unwind" fn set_redraw_rate_shim(
     let (Some(id), Some(ms)) = (arg_fixnum(args, 0), arg_fixnum(args, 1)) else {
         return Word::NIL.raw();
     };
-    if ms <= 0 {
-        return Word::NIL.raw();
-    }
-    std::thread::Builder::new()
-        .name(format!("igui-tick-{id}"))
-        .spawn(move || {
-            let dur = std::time::Duration::from_millis(ms as u64);
-            loop {
-                std::thread::sleep(dur);
-                igui_events::push(IGuiEvent::Tick { child_id: id, time_ms: 0 });
-            }
-        })
-        .ok();
+    window::set_redraw_rate(id, ms);
     Word::T.raw()
 }
 
@@ -317,6 +306,48 @@ fn event_to_plist(m: &mut MutatorState, coord: &GcCoordinator, ev: IGuiEvent) ->
         acc = m.alloc_cons(k, acc);
     }
     acc
+}
+
+/// Route a single event to the Lisp-side cooperative dispatcher.
+///
+/// Builds the event plist (the exact shape `next-event` returns) and
+/// funcalls the global Lisp function `%DISPATCH-EVENT` with it as the
+/// sole argument. `%dispatch-event` (Library/events.lisp) looks up the
+/// per-pane handler registered via `(on-window …)` / `(on-event …)` and
+/// invokes it, then returns — the cooperative contract.
+///
+/// This runs on the worker (language) thread that owns `mutator`, so the
+/// funcall, every allocation it makes, and the handler's drawing all
+/// happen on the single Lisp thread — never on the AppKit UI thread, and
+/// never on a second mutator. It is the inbound half of the routing the
+/// host's central loop drives: one loop, many panes, no per-pane thread.
+///
+/// Returns `false` (dispatching nothing) when no `%DISPATCH-EVENT` is
+/// installed — e.g. a `--lean` session that never loaded Library/events.
+///
+/// SAFETY: `mutator` must be the live `MutatorState` for the calling
+/// thread — the same invariant every shim in this module relies on.
+pub fn dispatch_event(mutator: *mut MutatorState, ev: IGuiEvent) -> bool {
+    let m = unsafe { &mut *mutator };
+    let coord = std::sync::Arc::clone(m.coord());
+
+    // Resolve the dispatcher's function cell BEFORE building the plist: a
+    // first-time intern can allocate, and we want any GC it triggers to
+    // run while there is no unrooted plist alive to be moved.
+    let sym = coord.intern("%DISPATCH-EVENT");
+    let handler = crate::gc_symbol::function_acquire(sym);
+    if handler.is_unbound() || handler.tag() != Tag::Function {
+        return false;
+    }
+
+    // event_to_plist is the final allocation; nothing between it and the
+    // funcall can trigger a GC, so the raw plist word stays valid as the
+    // call argument without an explicit precise-root push (same discipline
+    // handler_case_shim uses when it funcalls the handler with `&cond`).
+    let plist = event_to_plist(m, &coord, ev);
+    let arg = plist.raw();
+    crate::abi::ncl_funcall(mutator, handler.raw(), &arg as *const u64, 1);
+    true
 }
 
 pub extern "C-unwind" fn next_event_shim(

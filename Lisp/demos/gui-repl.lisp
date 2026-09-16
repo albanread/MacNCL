@@ -138,7 +138,5 @@
      (text-clear *repl-id*)
      (repl-banner)
      (repl-write-prompt)
-     (event-loop-for *repl-id*
-       (:frame-close (return :done))
-       (:close       (return :done))
+     (on-window *repl-id*
        (:char        (repl-handle-char (getf ev :char) (getf ev :codepoint)))))))

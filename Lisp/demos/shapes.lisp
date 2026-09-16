@@ -32,7 +32,5 @@
   (igui-start)
   (let ((id (open-child "shapes")))
     (paint-shapes id 480 320)
-    (event-loop-for id
-      (:frame-close (return :done))
-      (:close       (close-child id) (return :done))
+    (on-window id
       (:resize      (paint-shapes id (getf ev :width) (getf ev :height))))))

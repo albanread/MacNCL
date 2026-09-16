@@ -82,9 +82,7 @@
         (last-w 480)
         (last-h 320))
     (paint-buttons id last-w last-h hovered pressed)
-    (event-loop-for id
-      (:frame-close (return :done))
-      (:close       (close-child id) (return :done))
+    (on-window id
       (:resize      (setq last-w (getf ev :width))
                     (setq last-h (getf ev :height))
                     (paint-buttons id last-w last-h hovered pressed))
@@ -100,7 +98,7 @@
               (format t "clicked: ~A~%" (btn-label b))
               (when (equal (btn-label b) "Quit")
                 (close-child id)
-                (return :done)))
+                (stop-pane id)))
             (setq pressed nil)
             (paint-buttons id last-w last-h hovered pressed))
            ((eq op :move)

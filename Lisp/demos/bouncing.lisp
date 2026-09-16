@@ -90,9 +90,7 @@
        ;; for other children (a log view, REPL pane, etc.) park
        ;; in the stash. No more (= (getf ev :child-id) id) on
        ;; every clause.
-       (event-loop-for id
-         (:frame-close (return :done))
-         (:close       (return :done))
+       (on-window id
          (:resize      (resize-ball (getf ev :width) (getf ev :height)))
          (:tick        (advance-ball)
                        (paint-ball id))

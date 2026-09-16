@@ -12,9 +12,7 @@
       (format t "** open-repl-window failed — is the iGui frame up?~%")
       (return-from run-native-repl :failed))
 
-    (event-loop-for id
-      (:frame-close (return :done))
-      (:close       (return :done))
+    (on-window id
 
       ;; A complete Lisp form has been entered and submitted.
       (:repl-submit

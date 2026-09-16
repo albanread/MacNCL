@@ -28,6 +28,67 @@ pub enum IdeAction {
     Eval(String),
 }
 
+// ─── Menu bar ───────────────────────────────────────────────────────────
+//
+// An in-window, custom-drawn menu bar (the whole IDE is SurfaceCmd-drawn, so
+// a native NSMenu would mean fragile objc target/action plumbing for no gain).
+// Each command also has a keyboard shortcut handled in `on_key`; the menu
+// exists so those features are *discoverable* — the items show their keys.
+
+/// A menu command. Both the menu and a keyboard shortcut route here.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum MenuCmd {
+    NewTab,
+    CloseTab,
+    Save,
+    RunBuffer,
+    EvalForm,
+    ClearRepl,
+    FocusEditor,
+    FocusRepl,
+    Help,
+}
+
+struct MItem {
+    label: &'static str,
+    key: &'static str,
+    cmd: MenuCmd,
+}
+struct MMenu {
+    title: &'static str,
+    items: &'static [MItem],
+}
+
+const MENUS: &[MMenu] = &[
+    MMenu {
+        title: "File",
+        items: &[
+            MItem { label: "New Tab", key: "⌘T", cmd: MenuCmd::NewTab },
+            MItem { label: "Close Tab", key: "⌘W", cmd: MenuCmd::CloseTab },
+            MItem { label: "Save", key: "⌘S", cmd: MenuCmd::Save },
+        ],
+    },
+    MMenu {
+        title: "Eval",
+        items: &[
+            MItem { label: "Run Buffer", key: "⌘R", cmd: MenuCmd::RunBuffer },
+            MItem { label: "Eval Form at Point", key: "⌘↩", cmd: MenuCmd::EvalForm },
+            MItem { label: "Clear REPL", key: "⌘K", cmd: MenuCmd::ClearRepl },
+        ],
+    },
+    MMenu {
+        title: "View",
+        items: &[
+            MItem { label: "Focus Editor", key: "⌘E", cmd: MenuCmd::FocusEditor },
+            MItem { label: "Focus REPL", key: "⌘L", cmd: MenuCmd::FocusRepl },
+        ],
+    },
+    MMenu {
+        title: "Help",
+        items: &[MItem { label: "Keyboard Shortcuts", key: "", cmd: MenuCmd::Help }],
+    },
+];
+
 pub struct Ide {
     buffers: Vec<Editor>,
     active: usize,
@@ -39,9 +100,19 @@ pub struct Ide {
     ascent: f32,
     /// Fraction of the height given to the editor (top). REPL gets the rest.
     split: f32,
+    /// True while the user is dragging the editor/REPL divider.
+    dragging_split: bool,
+    /// Which top-level menu's dropdown is open, if any.
+    open_menu: Option<usize>,
     width: f32,
     height: f32,
 }
+
+/// How close (px) to the divider a click must land to start a drag.
+const SPLIT_GRAB: f32 = 5.0;
+/// Clamp the split so neither pane can be dragged shut.
+const SPLIT_MIN: f32 = 0.12;
+const SPLIT_MAX: f32 = 0.90;
 
 impl Ide {
     pub fn new(theme: Theme) -> Self {
@@ -66,6 +137,8 @@ impl Ide {
             ascent: theme.ascent,
             theme,
             split: 0.62,
+            dragging_split: false,
+            open_menu: None,
             width: 900.0,
             height: 620.0,
         }
@@ -149,12 +222,20 @@ impl Ide {
     fn status_h(&self) -> f32 {
         self.cell_h.max(12.0) + 4.0
     }
+    /// Height of the top menu bar.
+    fn menu_h(&self) -> f32 {
+        self.cell_h.max(14.0) + 6.0
+    }
+    /// Top of the editor stack: below the menu bar and the tab bar.
+    fn header_h(&self) -> f32 {
+        self.menu_h() + self.tab_h()
+    }
     fn editor_area(&self) -> Rect {
         let div = (self.height * self.split).round();
-        Rect { x0: 0.0, y0: self.tab_h(), x1: self.width, y1: div - self.status_h() }
+        Rect { x0: 0.0, y0: self.header_h(), x1: self.width, y1: div - self.status_h() }
     }
     fn tab_area(&self) -> Rect {
-        Rect { x0: 0.0, y0: 0.0, x1: self.width, y1: self.tab_h() }
+        Rect { x0: 0.0, y0: self.menu_h(), x1: self.width, y1: self.header_h() }
     }
     fn status_area(&self) -> Rect {
         let div = (self.height * self.split).round();
@@ -166,6 +247,171 @@ impl Ide {
     }
     fn tab_width(&self) -> f32 {
         (self.width / self.buffers.len() as f32).min(200.0).max(60.0)
+    }
+
+    // ─── menu geometry + hit-testing ──────────────────────────────────
+
+    /// Left/right x of each top-level menu title in the bar.
+    fn menu_title_x(&self) -> Vec<(f32, f32)> {
+        let mut out = Vec::with_capacity(MENUS.len());
+        let mut x = 8.0;
+        for m in MENUS {
+            let w = m.title.chars().count() as f32 * self.cell_w + 16.0;
+            out.push((x, x + w));
+            x += w;
+        }
+        out
+    }
+
+    fn dropdown_item_h(&self) -> f32 {
+        self.cell_h.max(14.0) + 6.0
+    }
+
+    fn dropdown_rect(&self, mi: usize) -> Rect {
+        let (x0, _) = self.menu_title_x()[mi];
+        let mut chars = 0usize;
+        for it in MENUS[mi].items {
+            chars = chars.max(it.label.chars().count() + it.key.chars().count());
+        }
+        let w = (chars as f32 * self.cell_w + 48.0).max(180.0);
+        let h = MENUS[mi].items.len() as f32 * self.dropdown_item_h() + 4.0;
+        Rect { x0, y0: self.menu_h(), x1: x0 + w, y1: self.menu_h() + h }
+    }
+
+    /// Index of the menu title under (mx,my), if the point is in the menu bar.
+    fn menu_title_at(&self, mx: f32, my: f32) -> Option<usize> {
+        if my >= self.menu_h() {
+            return None;
+        }
+        self.menu_title_x()
+            .into_iter()
+            .position(|(x0, x1)| mx >= x0 && mx < x1)
+    }
+
+    /// The command of the dropdown item under (mx,my) for the open menu `mi`.
+    fn dropdown_cmd_at(&self, mi: usize, mx: f32, my: f32) -> Option<MenuCmd> {
+        let r = self.dropdown_rect(mi);
+        if mx < r.x0 || mx > r.x1 || my < r.y0 || my > r.y1 {
+            return None;
+        }
+        let idx = ((my - r.y0 - 2.0) / self.dropdown_item_h()) as usize;
+        MENUS[mi].items.get(idx).map(|it| it.cmd)
+    }
+
+    /// Handle a left-down while the menu system is involved. Returns
+    /// `Some(action)` if the click was consumed (item picked, menu opened, or
+    /// an open menu dismissed), `None` to let normal pane handling proceed.
+    fn menu_mouse_down(&mut self, mx: f32, my: f32) -> Option<IdeAction> {
+        if let Some(mi) = self.open_menu {
+            if let Some(cmd) = self.dropdown_cmd_at(mi, mx, my) {
+                self.open_menu = None;
+                return Some(self.run_menu_cmd(cmd));
+            }
+            if let Some(ti) = self.menu_title_at(mx, my) {
+                // Click another title → switch; same title → close.
+                self.open_menu = if ti == mi { None } else { Some(ti) };
+                return Some(IdeAction::None);
+            }
+            // Click anywhere else dismisses the menu and is consumed.
+            self.open_menu = None;
+            return Some(IdeAction::None);
+        }
+        if let Some(ti) = self.menu_title_at(mx, my) {
+            self.open_menu = Some(ti);
+            return Some(IdeAction::None);
+        }
+        None
+    }
+
+    fn run_menu_cmd(&mut self, cmd: MenuCmd) -> IdeAction {
+        match cmd {
+            MenuCmd::NewTab => {
+                self.new_buffer();
+                IdeAction::None
+            }
+            MenuCmd::CloseTab => {
+                self.close_buffer();
+                IdeAction::None
+            }
+            MenuCmd::Save => {
+                self.save_buffer();
+                IdeAction::None
+            }
+            MenuCmd::RunBuffer => self.run_buffer(),
+            MenuCmd::EvalForm => {
+                self.focus = Focus::Editor;
+                self.eval_form_at_point()
+            }
+            MenuCmd::ClearRepl => {
+                self.clear_repl();
+                IdeAction::None
+            }
+            MenuCmd::FocusEditor => {
+                self.focus = Focus::Editor;
+                IdeAction::None
+            }
+            MenuCmd::FocusRepl => {
+                self.focus = Focus::Repl;
+                IdeAction::None
+            }
+            MenuCmd::Help => {
+                self.show_shortcuts();
+                IdeAction::None
+            }
+        }
+    }
+
+    // ─── command actions (shared by keyboard shortcuts and the menu) ───
+
+    fn run_buffer(&mut self) -> IdeAction {
+        let src = self.ed().text();
+        if !src.trim().is_empty() {
+            self.repl.info("; run buffer");
+            return IdeAction::Eval(src);
+        }
+        IdeAction::None
+    }
+
+    fn eval_form_at_point(&mut self) -> IdeAction {
+        // Eval the selection if there is one, else the form at point.
+        let sel = self.ed().selected_text();
+        let form = if !sel.trim().is_empty() {
+            Some(sel)
+        } else {
+            self.ed().current_form()
+        };
+        if let Some(form) = form {
+            self.repl.info(&format!("; {}", form.replace('\n', " ")));
+            return IdeAction::Eval(form);
+        }
+        IdeAction::None
+    }
+
+    fn save_buffer(&mut self) {
+        match self.ed_mut().save() {
+            Ok(Some(p)) => self.repl.info(&format!("; saved {p}")),
+            Ok(None) => self
+                .repl
+                .info("; no file — launch with `ncl --windows <file.lisp>` to set one"),
+            Err(e) => self.repl.error(&format!("save failed: {e}")),
+        }
+    }
+
+    fn clear_repl(&mut self) {
+        self.repl.clear();
+    }
+
+    fn show_shortcuts(&mut self) {
+        for line in [
+            "Keyboard shortcuts:",
+            "  Cmd-R  run buffer          Cmd-Return  eval form at point",
+            "  Cmd-T  new tab             Cmd-W       close tab",
+            "  Cmd-1..9  switch tab       Cmd-S       save buffer",
+            "  Cmd-E  focus editor        Cmd-L       focus REPL",
+            "  Cmd-K  clear REPL          drag the divider to resize panes",
+        ] {
+            self.repl.info(line);
+        }
     }
 
     // ─── events ───────────────────────────────────────────────────────
@@ -191,8 +437,39 @@ impl Ide {
                 let (mx, my) = (*x as f32, *y as f32);
                 let down = *op == mouse_op::LEFT_DOWN;
                 let drag = *op == mouse_op::DRAG;
+                let up = *op == mouse_op::LEFT_UP;
+
+                // ── menu bar / dropdown ──
+                // Takes priority: an open dropdown can overlay the editor, so
+                // its clicks must be caught before pane routing.
+                if down {
+                    if let Some(act) = self.menu_mouse_down(mx, my) {
+                        return act;
+                    }
+                }
+
+                // ── splitter drag ──
+                // Grab the editor/REPL divider on a down within SPLIT_GRAB px,
+                // track it through DRAG, release on UP. While dragging, the
+                // event never reaches a pane.
+                let div = (self.height * self.split).round();
+                if up {
+                    self.dragging_split = false;
+                    return IdeAction::None;
+                }
+                if down && (my - div).abs() <= SPLIT_GRAB && my > self.header_h() {
+                    self.dragging_split = true;
+                    return IdeAction::None;
+                }
+                if self.dragging_split {
+                    if drag && self.height > 0.0 {
+                        self.split = (my / self.height).clamp(SPLIT_MIN, SPLIT_MAX);
+                    }
+                    return IdeAction::None;
+                }
+
                 // Tab-bar click switches buffers.
-                if down && my < self.tab_h() {
+                if down && my >= self.menu_h() && my < self.header_h() {
                     let i = (mx / self.tab_width()) as usize;
                     self.switch_to(i);
                     return IdeAction::None;
@@ -249,26 +526,13 @@ impl Ide {
                     self.switch_to((vkey - 0x31) as usize);
                     return IdeAction::None;
                 } // Cmd-1..9
-                0x52 => {
-                    let src = self.ed().text();
-                    if !src.trim().is_empty() {
-                        self.repl.info("; run buffer");
-                        return IdeAction::Eval(src);
-                    }
-                    return IdeAction::None;
-                } // Cmd-R run buffer
+                0x52 => return self.run_buffer(), // Cmd-R run buffer
                 0x4B if mods & modifier::SHIFT == 0 => {
-                    self.repl.clear();
+                    self.clear_repl();
                     return IdeAction::None;
                 } // Cmd-K clear REPL (Cmd-Shift-K falls through to editor delete-line)
                 0x53 => {
-                    match self.ed_mut().save() {
-                        Ok(Some(p)) => self.repl.info(&format!("; saved {p}")),
-                        Ok(None) => self
-                            .repl
-                            .info("; no file — launch with `ncl --windows <file.lisp>` to set one"),
-                        Err(e) => self.repl.error(&format!("save failed: {e}")),
-                    }
+                    self.save_buffer();
                     return IdeAction::None;
                 } // Cmd-S
                 _ => {}
@@ -277,18 +541,7 @@ impl Ide {
         match self.focus {
             Focus::Editor => {
                 if cmd && vkey == vk::RETURN {
-                    // Eval the selection if there is one, else the form at point.
-                    let sel = self.ed().selected_text();
-                    let form = if !sel.trim().is_empty() {
-                        Some(sel)
-                    } else {
-                        self.ed().current_form()
-                    };
-                    if let Some(form) = form {
-                        self.repl.info(&format!("; {}", form.replace('\n', " ")));
-                        return IdeAction::Eval(form);
-                    }
-                    return IdeAction::None;
+                    return self.eval_form_at_point();
                 }
                 self.ed_mut().on_key(vkey, mods);
                 IdeAction::None
@@ -354,6 +607,24 @@ impl Ide {
 
         let mut cmds = vec![SurfaceCmd::Clear { color: self.theme.bg }];
 
+        // ── menu bar ──
+        let mh = self.menu_h();
+        cmds.push(SurfaceCmd::FillRect {
+            rect: Rect { x0: 0.0, y0: 0.0, x1: self.width, y1: mh },
+            corner_radius: 0.0,
+            color: Rgba { r: 0.08, g: 0.09, b: 0.12, a: 1.0 },
+        });
+        for (i, (m, (x0, x1))) in MENUS.iter().zip(self.menu_title_x()).enumerate() {
+            if self.open_menu == Some(i) {
+                cmds.push(SurfaceCmd::FillRect {
+                    rect: Rect { x0, y0: 1.0, x1, y1: mh - 1.0 },
+                    corner_radius: 3.0,
+                    color: Rgba { r: 0.20, g: 0.30, b: 0.42, a: 1.0 },
+                });
+            }
+            cmds.push(self.run(m.title.into(), x0 + 8.0, 3.0, self.theme.fg));
+        }
+
         // ── tab bar ──
         let ta = self.tab_area();
         cmds.push(SurfaceCmd::FillRect {
@@ -366,7 +637,7 @@ impl Ide {
             let x0 = i as f32 * tw;
             let active = i == self.active;
             cmds.push(SurfaceCmd::FillRect {
-                rect: Rect { x0: x0 + 1.0, y0: 2.0, x1: x0 + tw - 1.0, y1: ta.y1 },
+                rect: Rect { x0: x0 + 1.0, y0: ta.y0 + 2.0, x1: x0 + tw - 1.0, y1: ta.y1 },
                 corner_radius: 4.0,
                 color: if active {
                     Rgba { r: 0.18, g: 0.20, b: 0.26, a: 1.0 }
@@ -375,7 +646,7 @@ impl Ide {
                 },
             });
             let col = if active { self.theme.fg } else { self.theme.gutter_fg };
-            cmds.push(self.run(Self::tab_label(b), x0 + 8.0, 4.0, col));
+            cmds.push(self.run(Self::tab_label(b), x0 + 8.0, ta.y0 + 4.0, col));
         }
 
         // ── editor pane ──
@@ -404,11 +675,19 @@ impl Ide {
             cmds.push(c);
         }
 
-        // ── focus-indicating divider ──
+        // ── draggable divider ──
+        // Doubles as the focus indicator (lit on the focused side). While the
+        // user is dragging it, the whole bar lights up to signal it's live,
+        // and a short grab handle is drawn centred so it's discoverable.
         let _ = div_y;
-        let (etop, ebot) = match self.focus {
-            Focus::Editor => (focus_color(), Rgba { r: 0.3, g: 0.33, b: 0.4, a: 1.0 }),
-            Focus::Repl => (Rgba { r: 0.3, g: 0.33, b: 0.4, a: 1.0 }, focus_color()),
+        let dim = Rgba { r: 0.3, g: 0.33, b: 0.4, a: 1.0 };
+        let (etop, ebot) = if self.dragging_split {
+            (focus_color(), focus_color())
+        } else {
+            match self.focus {
+                Focus::Editor => (focus_color(), dim),
+                Focus::Repl => (dim, focus_color()),
+            }
         };
         cmds.push(SurfaceCmd::FillRect {
             rect: Rect { x0: area.x0, y0: div_real - 2.0, x1: area.x1, y1: div_real },
@@ -420,6 +699,40 @@ impl Ide {
             corner_radius: 0.0,
             color: ebot,
         });
+        // Centred grab handle — a short, brighter pill so the divider reads
+        // as draggable rather than a plain rule.
+        let hw = 18.0_f32.min(self.width * 0.25);
+        let cx = (area.x0 + area.x1) * 0.5;
+        cmds.push(SurfaceCmd::FillRect {
+            rect: Rect { x0: cx - hw, y0: div_real - 2.0, x1: cx + hw, y1: div_real + 2.0 },
+            corner_radius: 2.0,
+            color: focus_color(),
+        });
+
+        // ── open dropdown (drawn last, over everything) ──
+        if let Some(mi) = self.open_menu {
+            let r = self.dropdown_rect(mi);
+            cmds.push(SurfaceCmd::FillRect {
+                rect: r,
+                corner_radius: 4.0,
+                color: Rgba { r: 0.14, g: 0.15, b: 0.19, a: 1.0 },
+            });
+            cmds.push(SurfaceCmd::StrokeRect {
+                rect: r,
+                corner_radius: 4.0,
+                half_thickness: 0.5,
+                color: Rgba { r: 0.30, g: 0.34, b: 0.42, a: 1.0 },
+            });
+            let ih = self.dropdown_item_h();
+            for (j, it) in MENUS[mi].items.iter().enumerate() {
+                let y = r.y0 + 2.0 + j as f32 * ih;
+                cmds.push(self.run(it.label.into(), r.x0 + 10.0, y + 3.0, self.theme.fg));
+                if !it.key.is_empty() {
+                    let kx = r.x1 - it.key.chars().count() as f32 * self.cell_w - 12.0;
+                    cmds.push(self.run(it.key.into(), kx, y + 3.0, self.theme.gutter_fg));
+                }
+            }
+        }
         cmds
     }
 }
@@ -434,6 +747,98 @@ mod tests {
 
     fn key(vkey: i64, mods: i64) -> IGuiEvent {
         IGuiEvent::Key { child_id: 1, vkey, scancode: 0, mods, repeat: 0, down: true, time_ms: 0 }
+    }
+
+    fn mouse(op: i64, x: f32, y: f32) -> IGuiEvent {
+        IGuiEvent::Mouse {
+            child_id: 1, x: x as i64, y: y as i64, op, button: 0,
+            mods: 0, wheel_delta: 0, wheel_lines: 0, time_ms: 0,
+        }
+    }
+
+    #[test]
+    fn dragging_the_divider_moves_the_split() {
+        use crate::igui_events::mouse_op;
+        let mut ide = Ide::new(Theme::default());
+        ide.set_metrics(8.0, 16.0, 12.0);
+        // A render establishes width/height (900×620).
+        ide.render(Rect { x0: 0.0, y0: 0.0, x1: 900.0, y1: 620.0 });
+        let div = (ide.height * ide.split).round();
+
+        // Grab the divider, drag it up to ~30% of the height, release.
+        ide.handle_event(&mouse(mouse_op::LEFT_DOWN, 450.0, div));
+        assert!(ide.dragging_split, "down on the divider should start a drag");
+        ide.handle_event(&mouse(mouse_op::DRAG, 450.0, 0.30 * 620.0));
+        ide.handle_event(&mouse(mouse_op::LEFT_UP, 450.0, 0.30 * 620.0));
+        assert!(!ide.dragging_split, "up should end the drag");
+        assert!((ide.split - 0.30).abs() < 0.02, "split should track the cursor, got {}", ide.split);
+
+        // A click far from the divider must NOT start a drag.
+        ide.handle_event(&mouse(mouse_op::LEFT_DOWN, 450.0, 50.0));
+        assert!(!ide.dragging_split);
+    }
+
+    #[test]
+    fn menu_opens_and_runs_a_command() {
+        use crate::igui_events::mouse_op;
+        let mut ide = Ide::new(Theme::default());
+        ide.set_metrics(8.0, 16.0, 12.0);
+        ide.render(Rect { x0: 0.0, y0: 0.0, x1: 900.0, y1: 620.0 });
+        // Click the "File" title to open its dropdown.
+        let (x0, _) = ide.menu_title_x()[0];
+        ide.handle_event(&mouse(mouse_op::LEFT_DOWN, x0 + 4.0, 4.0));
+        assert_eq!(ide.open_menu, Some(0));
+        // Click "New Tab" (first item) → opens a buffer and closes the menu.
+        let r = ide.dropdown_rect(0);
+        let item_y = r.y0 + 2.0 + 0.5 * ide.dropdown_item_h();
+        let before = ide.buffers.len();
+        ide.handle_event(&mouse(mouse_op::LEFT_DOWN, r.x0 + 10.0, item_y));
+        assert_eq!(ide.open_menu, None);
+        assert_eq!(ide.buffers.len(), before + 1);
+    }
+
+    #[test]
+    fn menu_run_buffer_requests_an_eval() {
+        use crate::igui_events::mouse_op;
+        let mut ide = Ide::new(Theme::default());
+        ide.set_metrics(8.0, 16.0, 12.0);
+        ide.render(Rect { x0: 0.0, y0: 0.0, x1: 900.0, y1: 620.0 });
+        // Open "Eval" (index 1), click "Run Buffer" (item 0).
+        let (x0, _) = ide.menu_title_x()[1];
+        ide.handle_event(&mouse(mouse_op::LEFT_DOWN, x0 + 4.0, 4.0));
+        let r = ide.dropdown_rect(1);
+        let item_y = r.y0 + 2.0 + 0.5 * ide.dropdown_item_h();
+        match ide.handle_event(&mouse(mouse_op::LEFT_DOWN, r.x0 + 10.0, item_y)) {
+            IdeAction::Eval(src) => assert!(src.contains("defun square")),
+            _ => panic!("Run Buffer menu item should request an eval"),
+        }
+    }
+
+    #[test]
+    fn clicking_outside_dismisses_the_menu() {
+        use crate::igui_events::mouse_op;
+        let mut ide = Ide::new(Theme::default());
+        ide.set_metrics(8.0, 16.0, 12.0);
+        ide.render(Rect { x0: 0.0, y0: 0.0, x1: 900.0, y1: 620.0 });
+        let (x0, _) = ide.menu_title_x()[0];
+        ide.handle_event(&mouse(mouse_op::LEFT_DOWN, x0 + 4.0, 4.0));
+        assert_eq!(ide.open_menu, Some(0));
+        // A click down in the editor area dismisses it (and is consumed).
+        ide.handle_event(&mouse(mouse_op::LEFT_DOWN, 450.0, 400.0));
+        assert_eq!(ide.open_menu, None);
+    }
+
+    #[test]
+    fn split_is_clamped_so_panes_never_vanish() {
+        use crate::igui_events::mouse_op;
+        let mut ide = Ide::new(Theme::default());
+        ide.set_metrics(8.0, 16.0, 12.0);
+        ide.render(Rect { x0: 0.0, y0: 0.0, x1: 900.0, y1: 620.0 });
+        let div = (ide.height * ide.split).round();
+        ide.handle_event(&mouse(mouse_op::LEFT_DOWN, 450.0, div));
+        // Drag way past the bottom — split clamps, REPL stays visible.
+        ide.handle_event(&mouse(mouse_op::DRAG, 450.0, 5000.0));
+        assert!(ide.split <= SPLIT_MAX + 0.001 && ide.split >= SPLIT_MIN);
     }
 
     #[test]

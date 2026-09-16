@@ -1,7 +1,5 @@
 [workspace]
 members = [
-    "crates/doc-crate",
-    "crates/docpane",
     "crates/new-asm",
     "crates/selkie",
     "src/ncl-cl",

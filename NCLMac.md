@@ -21,12 +21,18 @@ Requirements: a Rust toolchain and LLVM 22.1.x (Homebrew `llvm`).
 set in `.cargo/config.toml`.
 
 ```sh
+# The graphical IDE (editor + REPL) — easiest:
+./run-gui.sh                       # builds (debug) and opens the IDE
+./run-gui.sh --release             # optimised build, faster startup
+./run-gui.sh --demo othello-gui    # IDE + run a demo;  --app for standalone
+./run-gui.sh --help                # all options
+
 # Console REPL (headless — no GUI)
 cargo run -p ncl-driver --release -- --repl
 echo '(* 6 7)' | ./target/release/ncl            # one-shot via stdin
 ./target/release/ncl --eval '(+ 1 2)'            # evaluate and print
 
-# The graphical IDE (editor + REPL) — needs a logged-in GUI session
+# The IDE, the underlying commands run-gui.sh wraps
 cargo run -p ncl-driver --features mac-gui -- --windows
 cargo run -p ncl-driver --features mac-gui -- --windows path/to/file.lisp
 ```

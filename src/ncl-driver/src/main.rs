@@ -11,11 +11,9 @@ use std::fs;
 use std::io::{self, BufRead, Write};
 use std::mem::MaybeUninit;
 use std::process::ExitCode;
-use std::sync::mpsc::{self, TryRecvError};
+use std::sync::mpsc;
 use std::sync::Mutex;
 use std::thread;
-#[cfg(not(windows))]
-use std::time::Duration;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -33,17 +31,19 @@ fn usage() {
     eprintln!("  --repl,  -r          enter the interactive REPL (default if no flags given)");
     eprintln!("  --lean,  -L          start with core only (no CLOS, no Library/init.lisp)");
     eprintln!("  --opt-level, -O <n>  JIT optimisation level 0..3 (default 2 = -O2)");
-    eprintln!("  --windows, -W        enable the Windows surface: thread 0 runs a Win32");
-    eprintln!("                       message pump, Lisp runs on a worker thread, and");
-    eprintln!("                       (windows-enabled-p) is T. Without this flag the");
-    eprintln!("                       process is byte-for-byte unchanged from today.");
+    eprintln!("  --windows, -W        macOS: open the Cocoa IDE window (editor + REPL) on the");
+    eprintln!("                       main thread, with Lisp on a worker. Without it, the plain");
+    eprintln!("                       console REPL runs.");
+    eprintln!("  --run-window         macOS: run a Lisp GUI app standalone (no IDE window).");
+    eprintln!("                       The app opens its own window via open-child and the");
+    eprintln!("                       process quits when the last window closes. Combine with");
+    eprintln!("                       --load/--eval, e.g. ncl --run-window -l app.lisp -e '(run)'");
     eprintln!("  --version, -V        print version and exit");
     eprintln!("  --help,    -h        print this message and exit");
     eprintln!("  multiple --eval / --load / --check can be chained; --repl runs after them");
     eprintln!();
     eprintln!("Environment variables:");
     eprintln!("  NCL_LIBRARY          override the Library/ directory location");
-    eprintln!("  NCL_PACK_DIR         override the packs/ directory (Win32 metadata pack)");
     eprintln!("  NCL_YOUNG_MB         young-heap reservation in MB (default 256)");
     eprintln!("  NCL_OLD_MB           old-heap reservation in MB (default 2048)");
     eprintln!("  NCL_STATIC_MB        static-area reservation in MB (default 1024,");
@@ -93,6 +93,15 @@ fn main() -> ExitCode {
         }
     }
 
+    // --run-window: macOS standalone-app mode. Run a Lisp GUI app with NO IDE
+    // window — the app opens its own window(s) via open-child and the process
+    // quits when the last one closes. Routed before the --windows logic so it
+    // takes precedence (it's its own surface). macOS + mac-gui only.
+    #[cfg(all(target_os = "macos", feature = "mac-gui"))]
+    if raw_args.iter().any(|a| a == "--run-window") {
+        return run_mac_app(raw_args);
+    }
+
     // --windows: thread 0 becomes the Win32 UI thread (message pump),
     // Lisp eval moves to a worker thread. See docs/WINDOWS_FFI.md.
     //
@@ -111,9 +120,11 @@ fn main() -> ExitCode {
         {
             return run_mac_gui(raw_args);
         }
+        // Without the mac-gui surface there is no windowed mode (the Win32
+        // surface was removed); `--windows` just runs the console session.
         #[cfg(not(all(target_os = "macos", feature = "mac-gui")))]
         {
-            run_with_windows_surface(raw_args)
+            run_without_windows_surface(raw_args)
         }
     } else {
         run_without_windows_surface(raw_args)
@@ -160,13 +171,20 @@ fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
     }
 
     let worker = move || {
-        let area = Rect { x0: 0.0, y0: 0.0, x1: W as f32, y1: H as f32 };
+        // The IDE render area. Tracks the live window size — updated when a
+        // Resize event for the main window arrives (see the central loop).
+        let mut area = Rect { x0: 0.0, y0: 0.0, x1: W as f32, y1: H as f32 };
         let theme = Theme::default();
         let (cw, ch, asc) = metrics(&theme.family, theme.size);
         let mut ide = Ide::new(theme);
         ide.set_metrics(cw, ch, asc);
         ide.info("Booting NCL standard library…");
         window::present_main(ide.render(area));
+
+        // Drive the loading bar (the main-thread timer reads this and paints
+        // a progress bar while we JIT the stdlib — the worker is busy here and
+        // can't repaint). ~820 ≈ functions in core + clos + Library (no xp).
+        ncl_runtime::load_progress::begin(820);
 
         let mut session = match ncl_compiler::Session::with_stdlib() {
             Ok(s) => s,
@@ -176,6 +194,42 @@ fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
                 return;
             }
         };
+        // Activate so `(eval-string …)` / the event-loop's :eval-buffer
+        // handler can re-enter this session — mirrors the console path
+        // (lisp_main). The worker owns `session` for its whole lifetime, so
+        // its address is stable.
+        session.activate();
+
+        // Load the user Library (Library/init.lisp) into the GUI session,
+        // exactly as the console path does in lisp_main. Without this, the
+        // session has only the baked-in core+CLOS stdlib — so `events`
+        // (on-window / event-loop / with-events-from) and the rest of the
+        // standard modules are undefined, and every graphics demo fails to
+        // compile (e.g. `(on-window …)` lowers as an unknown call). macOS
+        // keeps `(windows-enabled-p)` NIL, so init.lisp's `(when
+        // (windows-enabled-p) …)` Win32 block is skipped.
+        if let Some(library_dir) = find_library_dir() {
+            ide.info("Loading standard library…");
+            window::present_main(ide.render(area));
+            let setup = format!(
+                "(setq *load-path* (cons \"{}\" *load-path*))",
+                library_dir.replace('\\', "/")
+            );
+            if let Err(e) = session.eval(&setup) {
+                ide.error(&format!("could not extend *load-path*: {e:?}"));
+            }
+            let init_path = format!("{library_dir}/init.lisp");
+            if std::path::Path::new(&init_path).exists() {
+                let load = format!("(load \"{}\")", init_path.replace('\\', "/"));
+                if let Err(e) = session.eval(&load) {
+                    ide.error(&format!("Library/init.lisp failed: {e:?}"));
+                }
+            }
+        } else {
+            ide.error("Library/ not found — graphics demos (on-window, …) unavailable.");
+        }
+        ncl_runtime::load_progress::finish(); // hide the loading bar; IDE takes over
+
         ide.info(&format!("NCL {VERSION} on Apple Silicon — ready."));
         ide.info("Cmd-R run buffer · Cmd-Return eval form · Cmd-S save · Cmd-E/L focus");
 
@@ -290,46 +344,200 @@ fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
             });
         }
 
+        // ── Central cooperative event loop ───────────────────────────────
+        //
+        // ONE loop, on this single worker (language) thread, serves every
+        // pane. We drain the *catch-all* queue (empty filter) so the loop
+        // sees every event, then route each by its target window:
+        //
+        //   • window 1 (MAIN_ID)  → the IDE REPL/editor, handled in Rust
+        //   • any other window    → that pane's Lisp handler, dispatched
+        //                           through %dispatch-event (on-window …)
+        //   • global events       → both (the IDE and any global handlers)
+        //
+        // Apps no longer run their own blocking (event-loop-for …): they
+        // register a handler and return, so launching one from the REPL
+        // doesn't freeze the loop, and N panes coexist. The AppKit UI
+        // thread only ever posts into the mailbox, so it never blocks here.
+        igui_events::clear_filter();
+
         loop {
-            match igui_events::next_event(-1) {
-                None | Some(IGuiEvent::FrameClose) | Some(IGuiEvent::Close { .. }) => break,
-                Some(ev) => {
-                    // Skip the present churn for bare pointer motion.
-                    let is_move = matches!(
-                        &ev,
-                        IGuiEvent::Mouse { op, .. } if *op == igui_events::mouse_op::MOVE
-                    );
-                    if std::env::var_os("NCL_GUI_DEBUG").is_some() && !is_move {
-                        eprintln!("[gui] ev={ev:?}");
+            let Some(ev) = igui_events::next_event(-1) else {
+                break; // mailbox closed — process shutting down
+            };
+
+            // App-wide shutdown: the whole frame closing, or the IDE's own
+            // window. A *child* window closing only retires that pane (its
+            // handler unregisters), so it must NOT break the loop.
+            match &ev {
+                IGuiEvent::FrameClose => break,
+                IGuiEvent::Close { child_id } if *child_id == window::MAIN_ID => break,
+                _ => {}
+            }
+
+            // The main window resized → grow/shrink the IDE render area so the
+            // panes re-lay-out to fill the new client area.
+            if let IGuiEvent::Resize { child_id, width, height } = &ev {
+                if *child_id == window::MAIN_ID {
+                    area = Rect { x0: 0.0, y0: 0.0, x1: *width as f32, y1: *height as f32 };
+                }
+            }
+
+            let target = ev.child_id(); // Some(id) per-child, None for globals
+            let to_ide = target.is_none() || target == Some(window::MAIN_ID);
+            let to_app = target.is_none() || target != Some(window::MAIN_ID);
+
+            // Skip the IDE present churn for bare pointer motion.
+            let is_move = matches!(
+                &ev,
+                IGuiEvent::Mouse { op, .. } if *op == igui_events::mouse_op::MOVE
+            );
+            if std::env::var_os("NCL_GUI_DEBUG").is_some() && !is_move {
+                eprintln!("[gui] ev={ev:?} -> ide={to_ide} app={to_app}");
+            }
+
+            if to_ide {
+                if let IdeAction::Eval(src) = ide.handle_event(&ev) {
+                    // Capture the program's printed output so
+                    // `(format t …)` / print show up in the transcript.
+                    ncl_runtime::output::begin_capture();
+                    let result = session.eval(&src);
+                    if let Some(printed) = ncl_runtime::output::end_capture() {
+                        let printed = printed.trim_end_matches('\n');
+                        if !printed.is_empty() {
+                            ide.output(printed);
+                        }
                     }
-                    if let IdeAction::Eval(src) = ide.handle_event(&ev) {
-                        if std::env::var_os("NCL_GUI_DEBUG").is_some() {
-                            eprintln!("[gui] EVAL {src:?}");
-                        }
-                        // Capture the program's printed output so
-                        // `(format t …)` / print show up in the transcript.
-                        ncl_runtime::output::begin_capture();
-                        let result = session.eval(&src);
-                        if let Some(printed) = ncl_runtime::output::end_capture() {
-                            let printed = printed.trim_end_matches('\n');
-                            if !printed.is_empty() {
-                                ide.output(printed);
-                            }
-                        }
-                        match result {
-                            Ok(s) => ide.output(&s),
-                            Err(e) => ide.error(&format!("{e:?}")),
-                        }
-                    }
-                    if !is_move {
-                        window::present_main(ide.render(area));
+                    match result {
+                        Ok(s) => ide.output(&s),
+                        Err(e) => ide.error(&format!("{e:?}")),
                     }
                 }
+                if !is_move {
+                    window::present_main(ide.render(area));
+                }
+            }
+
+            if to_app {
+                // Route to the Lisp pane handler registered via (on-window …).
+                // The handler paints its own window, so the IDE is not
+                // re-presented for app events.
+                session.dispatch_gui_event(ev);
             }
         }
     };
 
     match window::run("MacNCL — REPL", W, H, worker) {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(e) => {
+            eprintln!("ncl: {e}");
+            ExitCode::from(1)
+        }
+    }
+}
+
+/// macOS standalone-app entry (`--run-window`). Like `run_mac_gui` but with NO
+/// IDE window: the Lisp worker boots, loads the Library, runs the app code
+/// passed via `--load`/`--eval` (which opens its own window(s) and registers
+/// `(on-window …)` handlers), then runs the central cooperative loop routing
+/// EVERY event to its Lisp pane handler. The AppKit layer quits the process
+/// when the last window closes. This is how Lisp ships a GUI app — Othello,
+/// Life, etc. — without the REPL/editor chrome.
+#[cfg(all(target_os = "macos", feature = "mac-gui"))]
+fn run_mac_app(raw_args: Vec<String>) -> ExitCode {
+    use ncl_runtime::igui_events::{self, IGuiEvent};
+    use ncl_runtime::igui_mac::window;
+
+    let worker = move || {
+        let mut session = match ncl_compiler::Session::with_stdlib() {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("ncl: stdlib bootstrap failed: {e:?}");
+                return;
+            }
+        };
+        session.activate();
+
+        // Load the user Library (events/on-window, graphics helpers, loop,
+        // sequences, …) — same as the IDE path; without it on-window and the
+        // graphics demos are undefined.
+        if let Some(library_dir) = find_library_dir() {
+            let setup = format!(
+                "(setq *load-path* (cons \"{}\" *load-path*))",
+                library_dir.replace('\\', "/")
+            );
+            if let Err(e) = session.eval(&setup) {
+                eprintln!("ncl: warning: could not extend *load-path*: {e:?}");
+            }
+            let init_path = format!("{library_dir}/init.lisp");
+            if std::path::Path::new(&init_path).exists() {
+                let load = format!("(load \"{}\")", init_path.replace('\\', "/"));
+                if let Err(e) = session.eval(&load) {
+                    eprintln!("ncl: warning: Library/init.lisp failed: {e:?}");
+                }
+            }
+        } else {
+            eprintln!("ncl: warning: Library/ not found — on-window unavailable.");
+        }
+
+        // Run the app code. --load <file>, --eval <form>, and bare `file.lisp`
+        // are evaluated in order; the app is expected to open a window and
+        // register an (on-window …) handler, then return.
+        let run_src = |session: &mut ncl_compiler::Session, label: &str, src: &str| {
+            ncl_runtime::output::begin_capture();
+            let r = session.eval(src);
+            if let Some(p) = ncl_runtime::output::end_capture() {
+                let p = p.trim_end_matches('\n');
+                if !p.is_empty() {
+                    println!("{p}");
+                }
+            }
+            if let Err(e) = r {
+                eprintln!("ncl: {label}: {e:?}");
+            }
+        };
+        let mut it = raw_args.iter();
+        while let Some(a) = it.next() {
+            match a.as_str() {
+                "--run-window" => {}
+                "--eval" | "-e" => {
+                    if let Some(src) = it.next() {
+                        run_src(&mut session, "eval", src);
+                    }
+                }
+                "--load" | "-l" => {
+                    if let Some(path) = it.next() {
+                        match std::fs::read_to_string(path) {
+                            Ok(src) => run_src(&mut session, path, &src),
+                            Err(e) => eprintln!("ncl: read {path}: {e}"),
+                        }
+                    }
+                }
+                s if !s.starts_with('-')
+                    && (s.ends_with(".lisp") || s.ends_with(".lsp") || s.ends_with(".cl")) =>
+                {
+                    match std::fs::read_to_string(s) {
+                        Ok(src) => run_src(&mut session, s, &src),
+                        Err(e) => eprintln!("ncl: read {s}: {e}"),
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        // Central cooperative loop: every event → its Lisp pane handler.
+        // No IDE pane to special-case (window 1 doesn't exist here).
+        igui_events::clear_filter();
+        loop {
+            let Some(ev) = igui_events::next_event(-1) else { break };
+            if matches!(ev, IGuiEvent::FrameClose) {
+                break;
+            }
+            session.dispatch_gui_event(ev);
+        }
+    };
+
+    match window::run_app(worker) {
         Ok(()) => ExitCode::SUCCESS,
         Err(e) => {
             eprintln!("ncl: {e}");
@@ -379,125 +587,6 @@ fn run_without_windows_surface(raw_args: Vec<String>) -> ExitCode {
     }
 }
 
-/// `--windows` path. Thread 0 registers itself as the UI thread,
-/// flips the `windows-enabled` flag, spawns the Lisp worker, then
-/// runs the Win32 message pump. When the worker finishes, it posts
-/// `WM_QUIT` to thread 0; the pump unblocks and we return the
-/// worker's exit code.
-///
-/// Crash recovery: a VEH installed at startup intercepts fatal SEH
-/// exceptions on the worker thread (access violations etc.) and
-/// redirects to ExitThread so the supervisor can detect and display
-/// the crash without taking down the whole process.  Rust panics are
-/// caught by `catch_unwind`.  On either kind of crash the frame stays
-/// alive showing the dump — the user closes it manually.
-fn run_with_windows_surface(raw_args: Vec<String>) -> ExitCode {
-    use std::sync::mpsc;
-
-    // Install the VEH crash handler BEFORE spawning the worker so the
-    // handler is in the chain when the very first JIT code runs.
-    #[cfg(windows)]
-    ncl_runtime::igui::crash_handler::install();
-
-    // Flip the flag BEFORE spawning the worker so init.lisp sees it.
-    ncl_runtime::win_surface::set_windows_enabled(true);
-    ncl_runtime::win_surface::register_ui_thread();
-    // Create the hidden HWND_MESSAGE dispatch window before the
-    // worker can possibly send the first WM_NCL_EXECUTE message.
-    ncl_runtime::win_surface::init_ui_dispatch();
-    // Load the Win32 metadata pack (Phase 4). Looks under
-    // <exe-dir>/../packs/windows_api.pack first (dev), then
-    // <exe-dir>/packs/windows_api.pack (install). Failure is
-    // non-fatal: %ffi-call still works directly; only (win32 …) /
-    // (defwin32 …) need the pack and they report a clean error
-    // when they can't find it.
-    if let Some(pack_path) = find_pack_path() {
-        ncl_runtime::win_metadata::try_load_pack(&pack_path);
-    }
-
-    let (tx, rx) = mpsc::sync_channel::<ExitCode>(1);
-
-    let worker = match std::thread::Builder::new()
-        .name("ncl-lisp-worker".into())
-        .spawn(move || {
-            // Register this thread so the VEH only intercepts our
-            // worker, not the UI thread.
-            #[cfg(windows)]
-            ncl_runtime::igui::crash_handler::register_worker_thread();
-
-            // Wrap in catch_unwind to catch Rust panics before they
-            // unwind into JIT frames (which have no unwind tables).
-            let result = std::panic::catch_unwind(
-                std::panic::AssertUnwindSafe(|| lisp_main(raw_args))
-            );
-
-            #[cfg(windows)]
-            ncl_runtime::igui::crash_handler::unregister_worker_thread();
-
-            match result {
-                Ok(code) => {
-                    // Clean exit: report the code and shut the UI down.
-                    let _ = tx.send(code);
-                    ncl_runtime::win_surface::post_quit_to_ui_thread();
-                }
-                Err(payload) => {
-                    // Rust panic: format and push to the crash view, then
-                    // leave the frame alive so the user can read the report.
-                    let msg = payload
-                        .downcast_ref::<&str>()
-                        .copied()
-                        .map(String::from)
-                        .or_else(|| payload.downcast_ref::<String>().cloned())
-                        .unwrap_or_else(|| "<unknown Rust panic>".to_string());
-                    let dump = format!(
-                        "kind:    Rust panic (worker thread)\nmessage: {msg}\n\n\
-                         The Lisp worker thread has been terminated.  The session\n\
-                         is no longer available — close the window and restart.\n"
-                    );
-                    #[cfg(windows)]
-                    ncl_runtime::igui::crash_view::push(dump);
-                    #[cfg(not(windows))]
-                    eprintln!("ncl: {dump}");
-                    // Do NOT post WM_QUIT — leave the frame alive so the
-                    // user can read the crash view before closing.
-                }
-            }
-        }) {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("ncl: cannot spawn worker thread: {e}");
-            return ExitCode::from(1);
-        }
-    };
-
-    // Supervisor thread: watches the worker for SEH-caught crashes.
-    // If the worker exited via ExitThread (from the VEH thunk), the
-    // Rust catch_unwind never ran so the Rust-panic branch above was
-    // skipped; we detect it here via take_dump().
-    std::thread::Builder::new()
-        .name("ncl-crash-supervisor".into())
-        .spawn(move || {
-            // Wait for the worker to finish (or crash).
-            let _ = worker.join();
-            // Check whether the VEH captured an SEH dump.
-            #[cfg(windows)]
-            if let Some(dump) = ncl_runtime::igui::crash_handler::take_dump() {
-                let text = ncl_runtime::igui::crash_handler::format_dump(&dump);
-                ncl_runtime::igui::crash_view::push(text);
-                // Frame stays alive; WM_QUIT is NOT posted here so the
-                // user can read the crash view before closing.
-            }
-        })
-        .ok(); // Failure to spawn supervisor is non-fatal.
-
-    // Thread 0 takes over the pump. Returns when the worker posts WM_QUIT
-    // (clean exit path) or the user closes the frame.
-    ncl_runtime::win_surface::run_message_pump();
-
-    // Read back the worker's exit code if available (sent on clean exit).
-    rx.try_recv().unwrap_or(ExitCode::SUCCESS)
-}
-
 /// The Lisp side of startup — runs on thread 0 without `--windows`,
 /// on the worker thread with `--windows`. Builds the session, loads
 /// stdlib + Library/init.lisp, processes `--eval` / `--load` flags,
@@ -538,12 +627,6 @@ fn lisp_main(raw_args: Vec<String>) -> ExitCode {
     let mut session = Box::new(session);
     session.activate();
 
-    // Publish the coordinator so thread 0 can register itself as a
-    // mutator on the same heap when WM_NCL_EXECUTE arrives. No-op
-    // when --windows is off (the OnceLock is set but no one reads
-    // it); harmless to do unconditionally.
-    ncl_runtime::win_surface::publish_coordinator(session.coord().clone());
-
     // ─── User library bootstrap ──────────────────────────────────────────
     //
     // Look for `Library/` next to the executable. If it exists, push
@@ -558,17 +641,6 @@ fn lisp_main(raw_args: Vec<String>) -> ExitCode {
     // depend on CLOS — so library bootstrap is suppressed by choice,
     // not by absence).
     if !lean {
-        // ── Startup splash ───────────────────────────────────────────────
-        // In --windows mode open the iGui loading bar before the Library
-        // starts JITting.  Total form count is pre-baked from profiling:
-        //   core ≈ 197  +  clos ≈ 215  +  Library (no xp) ≈ 393  =  805
-        #[cfg(windows)]
-        let with_splash = ncl_runtime::win_surface::windows_enabled();
-        #[cfg(windows)]
-        if with_splash {
-            ncl_runtime::igui::splash::begin(805);
-        }
-
         if let Some(library_dir) = find_library_dir() {
             let setup = format!(
                 "(setq *load-path* (cons \"{}\" *load-path*))",
@@ -590,12 +662,6 @@ fn lisp_main(raw_args: Vec<String>) -> ExitCode {
                     ncl_compiler::Session::drain_startup_timing("Library (top-10 slowest)", lib_ms);
                 }
             }
-        }
-
-        // Close the splash now that the Library is ready.
-        #[cfg(windows)]
-        if with_splash {
-            ncl_runtime::igui::splash::finish();
         }
     }
 
@@ -707,49 +773,12 @@ fn lisp_main(raw_args: Vec<String>) -> ExitCode {
     }
 
     if want_repl {
-        // `--windows` was already consumed by main() to set up the UI
-        // thread, but lisp_main still needs to know about it so the
-        // REPL can interleave iGui-mailbox draining with stdin reads.
-        // Also poll iGui when igui-start was called (sets windows_enabled
-        // without --windows on the command line).
-        let with_windows = std::env::args().any(|a| a == "--windows" || a == "-W")
-            || ncl_runtime::win_surface::windows_enabled();
-
-        // In the GUI release build the process has no console: stdin is
-        // attached to NUL and gives immediate EOF, which would make the
-        // REPL exit instantly and close the window.  Run a pure iGui
-        // event loop instead — same event handling, no stdin.
-        #[cfg(feature = "gui-app")]
-        if with_windows {
-            return run_gui_event_loop(&mut session);
-        }
-
-        return run_repl(&mut session, with_windows);
+        // Console REPL. (The windowed IDE is run_mac_gui, dispatched from
+        // main() on the `--windows` path; this is the plain stdin REPL.)
+        return run_repl(&mut session);
     }
 
     ExitCode::SUCCESS
-}
-
-/// Resolve the path to `packs/windows_api.pack` for the Windows
-/// surface metadata. Search order matches `find_library_dir`:
-///   1. NCL_PACK_DIR env override
-///   2. <exe_dir>/packs/windows_api.pack  (installed shape)
-///   3. <exe_dir>/../../packs/windows_api.pack  (dev build)
-fn find_pack_path() -> Option<std::path::PathBuf> {
-    if let Ok(p) = std::env::var("NCL_PACK_DIR") {
-        let cand = std::path::Path::new(&p).join("windows_api.pack");
-        if cand.is_file() { return Some(cand); }
-    }
-    let exe = std::env::current_exe().ok()?;
-    let exe_dir = exe.parent()?;
-    let beside = exe_dir.join("packs").join("windows_api.pack");
-    if beside.is_file() { return Some(beside); }
-    let dev = exe_dir.ancestors().nth(2)
-        .map(|p| p.join("packs").join("windows_api.pack"));
-    if let Some(d) = dev {
-        if d.is_file() { return Some(d); }
-    }
-    None
 }
 
 /// Resolve the path to `Library/` next to the executable. Returns
@@ -887,34 +916,6 @@ fn wrap_for_repl(src: &str) -> String {
     )
 }
 
-/// Worker loop for the GUI release build (`gui-app` feature).
-///
-/// No console is attached, so there is no stdin to read. The thread
-/// stays alive by blocking on the iGui event mailbox indefinitely,
-/// forwarding each event to the same handler that the windowed REPL
-/// uses. Exits when the mailbox closes (process shutdown) or when a
-/// `FrameClose` event arrives and the channel drains.
-#[cfg(feature = "gui-app")]
-fn run_gui_event_loop(session: &mut ncl_compiler::Session) -> ExitCode {
-    #[cfg(windows)]
-    {
-        use ncl_runtime::igui::channels::IGuiEvent;
-        loop {
-            match ncl_runtime::igui::channels::next_event(-1) {
-                // Frame closed → let the worker exit so the supervisor
-                // can post WM_QUIT and the message pump unblocks.
-                Some(IGuiEvent::FrameClose) | None => break,
-                Some(ev) => handle_repl_event(session, ev),
-            }
-        }
-    }
-    #[cfg(not(windows))]
-    {
-        let _ = session;
-    }
-    ExitCode::SUCCESS
-}
-
 /// Interactive read-eval-print loop. Reads from stdin, accumulates
 /// input until the form is parseable (handles multi-line entry by
 /// detecting an UnexpectedEof from the reader and prompting again),
@@ -923,21 +924,7 @@ fn run_gui_event_loop(session: &mut ncl_compiler::Session) -> ExitCode {
 /// Exit on Ctrl+D / EOF, or by typing `(exit)` or `(quit)` at the
 /// top-level prompt. Panics inside the eval are caught via a
 /// setjmp/longjmp pair and the prompt is restored.
-///
-/// When `with_windows` is true, the loop also drains the iGui event
-/// mailbox between stdin reads. The motivating case is `:eval-buffer`
-/// events fired by ledit's F5/Ctrl+R: those land in the mailbox and
-/// would otherwise be ignored unless a Lisp-level `(event-loop-for ...)`
-/// happens to be running. With this interleaving, F5 in the editor
-/// always evaluates the buffer through the active session, even when
-/// the user is just sitting at the REPL prompt — matching the NewFB
-/// and NewBCPL "run from the IDE" model.
-///
-/// The mailbox poll is a 50ms blocking recv; stdin is a `try_recv`
-/// against a channel fed by a helper thread. Stdin has priority but
-/// each iteration always touches both sources, so the worst-case
-/// keystroke latency is ~50ms.
-fn run_repl(session: &mut ncl_compiler::Session, with_windows: bool) -> ExitCode {
+fn run_repl(session: &mut ncl_compiler::Session) -> ExitCode {
     install_repl_panic_hook();
 
     println!("NCL {VERSION} REPL");
@@ -959,44 +946,13 @@ fn run_repl(session: &mut ncl_compiler::Session, with_windows: bool) -> ExitCode
         }
         print_prompt(buf.trim().is_empty());
 
-        // Wait for the next line of input. With `--windows`, between
-        // try_recv polls of stdin we also drain the iGui mailbox so
-        // F5 in ledit reaches the active session.
-        let line_result = loop {
-            match stdin_rx.try_recv() {
-                Ok(r) => break r,
-                Err(TryRecvError::Disconnected) => {
-                    // Reader thread died — treat like EOF.
-                    println!();
-                    break 'repl;
-                }
-                Err(TryRecvError::Empty) => {
-                    if with_windows {
-                        #[cfg(windows)]
-                        {
-                            if let Some(ev) =
-                                ncl_runtime::igui::channels::next_event(50)
-                            {
-                                handle_repl_event(session, ev);
-                            }
-                        }
-                        #[cfg(not(windows))]
-                        {
-                            thread::sleep(Duration::from_millis(50));
-                        }
-                    } else {
-                        // No iGui mailbox to drain — block on stdin so
-                        // we don't busy-wait. recv_timeout(forever) is
-                        // recv().
-                        match stdin_rx.recv() {
-                            Ok(r) => break r,
-                            Err(_) => {
-                                println!();
-                                break 'repl;
-                            }
-                        }
-                    }
-                }
+        // Wait for the next line of input (blocking).
+        let line_result = match stdin_rx.recv() {
+            Ok(r) => r,
+            Err(_) => {
+                // Reader thread died / EOF.
+                println!();
+                break 'repl;
             }
         };
 
@@ -1086,101 +1042,6 @@ fn spawn_stdin_reader() -> mpsc::Receiver<io::Result<String>> {
         }
     });
     rx
-}
-
-/// Handle one iGui event during a REPL idle tick. Today we care
-/// about `EvalBuffer` (the editor's F5 / Ctrl+R run-buffer event);
-/// every other event kind is dropped, because no Lisp-level
-/// `(event-loop-for ...)` is consuming them and there's no other
-/// listener to forward to.
-///
-/// `EvalBuffer` runs the buffer source through `session.eval`. The
-/// result lands in the iGui log overlay (Ctrl+Shift+L) so the user
-/// gets immediate feedback even though they're focused on the
-/// editor pane, not the REPL pane.
-#[cfg(windows)]
-fn handle_repl_event(
-    session: &mut ncl_compiler::Session,
-    ev: ncl_runtime::igui::channels::IGuiEvent,
-) {
-    use ncl_runtime::igui::channels::IGuiEvent;
-    use ncl_runtime::igui::log_view;
-    match ev {
-        IGuiEvent::EvalBuffer { source } => {
-            log_view::append(&format!(
-                "[F5] evaluating {} chars from editor", source.len()
-            ));
-            match session.eval(&source) {
-                Ok(result) => {
-                    let summary = summarize_eval_result(&result);
-                    log_view::append(&format!("[F5] => {summary}"));
-                }
-                Err(e) => {
-                    log_view::append(&format!("[F5] error: {e}"));
-                }
-            }
-        }
-        IGuiEvent::ReplSubmit { child_id } => {
-            use ncl_runtime::igui::repl_child::{self, AppendKind};
-            // Drain the whole input queue for this child (normally one
-            // entry, but drain all to stay in sync).
-            while let Some(src) = repl_child::pop_input(child_id) {
-                // Wrap in handler-case so Lisp conditions come back as
-                // "** message" strings rather than crashing the worker.
-                let wrapped = wrap_for_repl(&src);
-                match session.eval(&wrapped) {
-                    Ok(result) => {
-                        let trimmed = result.trim_end().to_string();
-                        if !trimmed.is_empty() {
-                            // wrap_for_repl prefixes condition messages
-                            // with "** "; display those in error colour.
-                            let kind = if trimmed.starts_with("** ") {
-                                AppendKind::Error
-                            } else {
-                                AppendKind::Output
-                            };
-                            repl_child::append(child_id, trimmed, kind);
-                        }
-                    }
-                    Err(e) => {
-                        repl_child::append(
-                            child_id,
-                            format!("{e}"),
-                            AppendKind::Error,
-                        );
-                    }
-                }
-            }
-        }
-        _ => {
-            // No active listener — drop. Demos that want events
-            // start their own (event-loop-for ...) inside the form
-            // they run; while that form is on the stack, this REPL
-            // poll loop is paused, so the demo gets first crack at
-            // every event from the mailbox.
-        }
-    }
-}
-
-/// Condense an eval result to one short line for the log overlay.
-/// Multi-line results just get a "(N lines)" tag — the user can
-/// re-run from a window with their own clause to see the full text.
-#[cfg(windows)]
-fn summarize_eval_result(result: &str) -> String {
-    let trimmed = result.trim_end();
-    if trimmed.is_empty() {
-        return "nil".to_string();
-    }
-    if let Some(idx) = trimmed.find('\n') {
-        let head: String = trimmed[..idx].chars().take(60).collect();
-        let lines = 1 + trimmed.bytes().filter(|b| *b == b'\n').count();
-        return format!("({lines} lines) {head}...");
-    }
-    if trimmed.chars().count() <= 80 {
-        return trimmed.to_string();
-    }
-    let head: String = trimmed.chars().take(77).collect();
-    format!("{head}...")
 }
 
 /// Run one eval inside a setjmp shield. If the eval panics, the

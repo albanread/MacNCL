@@ -411,37 +411,44 @@
        (paint-board id)
        ;; ~60 fps so the AI countdown ticks promptly.
        (set-redraw-rate id 50)
-       (event-loop-for id
-         (:frame-close (return :done))
-         (:close       (return :done))
+       ;; Cooperative model: register a handler and RETURN. The host's
+       ;; single central loop drives this pane (and the REPL, and any
+       ;; other open app) on the shared language thread — so launching
+       ;; Othello from the REPL doesn't freeze it. The `:close` box is
+       ;; auto-handled (stop-pane); Esc tears the pane down explicitly.
+       (on-window id
          (:resize      (setq *win-w* (max (getf ev :width)  64))
-                       (setq *win-h* (max (getf ev :height) 64)))
+                       (setq *win-h* (max (getf ev :height) 64))
+                       (paint-board self))
          (:mouse       (when (and (eq (getf ev :op) :left-down)
                                   (null *ai-pending*))
                          (when (try-human-move (getf ev :x) (getf ev :y))
-                           (paint-board id))))
+                           (paint-board self))))
          (:tick        (when *ai-pending*
                          (setq *ai-pending* (- *ai-pending* 1))
                          (when (<= *ai-pending* 0)
                            (setq *ai-pending* nil)
                            (do-ai-move)))
-                       (paint-board id))
+                       (paint-board self))
          (:char        (let ((ch (getf ev :char)))
                          (cond
-                           ((or (eq ch #\n) (eq ch #\N))
-                            (new-game))
-                           ((or (eq ch #\b) (eq ch #\B))
-                            (pick-beginner)
-                            (setq *status*
-                                  (format nil "AI now: ~A — your move (Black)" *ai-name*)))
-                           ((or (eq ch #\i) (eq ch #\I))
-                            (pick-intermediate)
-                            (setq *status*
-                                  (format nil "AI now: ~A — your move (Black)" *ai-name*)))
-                           ((or (eq ch #\a) (eq ch #\A))
-                            (pick-advanced)
-                            (setq *status*
-                                  (format nil "AI now: ~A — your move (Black)" *ai-name*)))
                            ((or (eq ch #\Escape) (eq ch #\Esc))
-                            (return :done))))
-                       (paint-board id)))))))
+                            (stop-pane self))
+                           (t
+                            (cond
+                              ((or (eq ch #\n) (eq ch #\N))
+                               (new-game))
+                              ((or (eq ch #\b) (eq ch #\B))
+                               (pick-beginner)
+                               (setq *status*
+                                     (format nil "AI now: ~A — your move (Black)" *ai-name*)))
+                              ((or (eq ch #\i) (eq ch #\I))
+                               (pick-intermediate)
+                               (setq *status*
+                                     (format nil "AI now: ~A — your move (Black)" *ai-name*)))
+                              ((or (eq ch #\a) (eq ch #\A))
+                               (pick-advanced)
+                               (setq *status*
+                                     (format nil "AI now: ~A — your move (Black)" *ai-name*))))
+                            (paint-board self))))))
+       id))))

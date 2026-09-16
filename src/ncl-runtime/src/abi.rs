@@ -2282,6 +2282,23 @@ thread_local! {
     pub(crate) static ABORT_PENDING: Cell<bool> = const { Cell::new(false) };
 }
 
+/// Reset every non-local-exit thread-local flag to its quiescent state.
+///
+/// Called at the top-level eval boundary (once per top-level form) so a
+/// leaked `(return …)` / `return-from` / `throw` / loop-break from one form
+/// cannot poison the next. Without this, a stray unconsumed exit leaves
+/// `ABORT_PENDING` set, and the JIT's post-call abort check makes the *next*
+/// form early-return before executing its body — the symptom that broke the
+/// Othello demo, whose `(event-loop-for …)` never ran.
+pub fn reset_nonlocal_exit_state() {
+    ABORT_PENDING.with(|c| c.set(false));
+    LOOP_BREAK_PENDING.with(|c| c.set(false));
+    LOOP_BREAK_VALUE.with(|c| c.set(0));
+    BLOCK_TARGET.with(|c| c.set(0));
+    THROW_PENDING.with(|c| c.set(false));
+    THROW_TAG.with(|c| c.set(0));
+}
+
 /// JIT-callable check. Returns 1 if a non-local exit is
 /// pending; 0 otherwise. Lowered as an inline call after every
 /// Expr::Call / Funcall / Apply.

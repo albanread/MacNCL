@@ -27,10 +27,8 @@ pub mod gc_symbol;
 pub mod gc;
 pub mod heap;
 pub mod heap_common;
-#[cfg(windows)]
-pub mod igui;
-/// Platform-neutral iGui drawing IR (`SurfaceCmd` & friends), shared by
-/// the Windows Direct2D executor and the macOS Core Graphics renderer.
+/// Platform-neutral iGui drawing IR (`SurfaceCmd` & friends), consumed by
+/// the macOS Core Graphics renderer.
 pub mod igui_paint;
 /// Platform-neutral iGui event mailbox (`IGuiEvent` + the GUI→Lisp
 /// dispatcher), shared by the Windows and macOS windowing layers.
@@ -43,6 +41,9 @@ pub mod igui_text;
 #[cfg(target_os = "macos")]
 pub mod igui_mac;
 pub mod mutator;
+/// Cross-platform startup-load progress (forms compiled / total), read by the
+/// macOS loading bar while the worker JIT-compiles the stdlib.
+pub mod load_progress;
 /// Redirectable stdout (lets the GUI capture `(format t …)` output).
 pub mod output;
 pub mod printer;
@@ -54,11 +55,9 @@ pub mod symbol;
 pub mod threads;
 pub mod universe;
 pub mod value;
-pub mod win_buffer;
-pub mod win_callback;
-pub mod win_ffi;
-pub mod win_metadata;
-pub mod win_surface;
+/// Platform-neutral malloc-backed foreign memory buffers (read/write/zero of
+/// ints, pointers, wide strings). Used by the canvas pixel-poke demos.
+pub mod foreign_buffer;
 pub mod word;
 
 pub use abi::{
@@ -95,27 +94,7 @@ pub use abi::{
     NclCondition,
 };
 
-#[cfg(windows)]
-pub use igui::lisp_shims::{
-    begin_batch_shim, close_child_shim, emit_clear_shim, emit_draw_arc_shim,
-    emit_draw_line_shim, emit_draw_text_shim, emit_draw_text_styled_shim,
-    emit_fill_circle_shim,
-    emit_fill_oval_shim, emit_fill_rect_shim, emit_stroke_circle_shim,
-    emit_stroke_oval_shim, emit_stroke_rect_shim, igui_quit_shim,
-    igui_start_shim, igui_wait_shim, log_write_shim, measure_text_shim,
-    clear_event_filter_shim, discard_stashed_events_shim, filter_on_window_shim,
-    next_event_for_shim, next_event_shim, open_child_shim, open_child_sized_shim, open_text_window_shim,
-    set_redraw_rate_shim, unfilter_window_shim,
-    set_title_shim, submit_batch_shim, text_clear_eol_shim, text_clear_eos_shim, text_clear_shim,
-    text_newline_shim, text_reset_pen_shim, text_scroll_up_shim,
-    text_set_cursor_shim, text_set_pen_shim, text_show_caret_shim,
-    text_write_char_shim, text_write_shim,
-    open_repl_window_shim, repl_output_shim, repl_error_shim, repl_pop_input_shim,
-    open_doc_window_shim, doc_set_markdown_shim, doc_append_markdown_shim,
-    canvas_open_shim, canvas_present_shim,
-    mdi_arrange_icons_shim, mdi_cascade_shim, mdi_tile_shim,
-};
-/// macOS iGui shims (subset for graphics apps), mirroring the Windows names.
+/// macOS iGui shims (subset for graphics apps).
 #[cfg(all(target_os = "macos", feature = "mac-gui"))]
 pub use igui_mac::shims::{
     begin_batch_shim, clear_event_filter_shim, close_child_shim, discard_stashed_events_shim,
@@ -135,17 +114,13 @@ pub use audio::{
 pub use printer::{format_word, format_word_aesthetic};
 pub use random::random_shim;
 
-pub use win_buffer::{
+pub use foreign_buffer::{
     buffer_read_wstring_shim, buffer_ref_i16_shim, buffer_ref_i32_shim, buffer_ref_i64_shim,
     buffer_ref_i8_shim, buffer_ref_ptr_shim, buffer_ref_u16_shim, buffer_ref_u32_shim,
     buffer_ref_u64_shim, buffer_ref_u8_shim, buffer_set_i16_shim, buffer_set_i32_shim,
     buffer_set_i64_shim, buffer_set_i8_shim, buffer_set_ptr_shim, buffer_set_u16_shim,
     buffer_set_u32_shim, buffer_set_u64_shim, buffer_set_u8_shim, buffer_write_wstring_shim,
     buffer_zero_shim, free_foreign_buffer_shim, make_foreign_buffer_shim,
-};
-pub use win_ffi::{ffi_call_shim, win32_call_shim, win32_lookup_shim};
-pub use win_surface::{
-    ui_execute_shim, ui_thread_id_shim, ui_thread_p_shim, windows_enabled_p_shim,
 };
 
 pub use threads::{

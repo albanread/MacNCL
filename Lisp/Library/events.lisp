@@ -146,9 +146,149 @@
        (with-events-from WIN
          (event-loop clauses...))
 
-   pattern."
+   pattern.
+
+   NOTE: this BLOCKS the calling (language) thread inside its loop, so it
+   monopolises the one Lisp thread for as long as it runs. That's fine for
+   a standalone `ncl --windows -l app.lisp` launch, but inside the hosted
+   IDE it would freeze the REPL and every other pane. For IDE-hosted apps
+   prefer the cooperative ON-WINDOW below: register a handler and return,
+   and the host's central loop drives every pane on the shared thread."
   `(with-events-from ,window-form
      (event-loop ,@clauses)))
+
+;; ── Cooperative dispatch: many panes, one language thread ───────────────
+;;
+;; The blocking model above gives each pane its own (next-event …) loop —
+;; which means each pane needs its own thread, or it starves the others.
+;; With a single language thread (the GC mutator is thread-bound) that
+;; doesn't scale: the first app's loop freezes the REPL and blocks every
+;; other pane.
+;;
+;; The cooperative model inverts it. The HOST runs exactly one central
+;; loop (see ncl-driver) that drains every event and calls %DISPATCH-EVENT
+;; once per event. Each pane registers a handler with (on-window …) /
+;; (on-event …) and returns immediately; its handler runs to completion on
+;; the shared thread and yields. No pane ever blocks, so N panes — and the
+;; live REPL — coexist on one thread, while the AppKit UI thread only ever
+;; posts into the mailbox.
+
+(defparameter *pane-handlers* (make-hash-table)
+  "Window-id → handler function (of one arg, the event plist). Populated
+   by (on-event …); consulted by %DISPATCH-EVENT to route per-pane events.")
+
+(defparameter *global-handlers* nil
+  "Functions called for every *global* event — one with no :child-id:
+   frame-close, theme-change, menu, eval-buffer. See (on-global-event …).")
+
+(defun on-event (win handler)
+  "Register HANDLER as the cooperative event handler for window WIN,
+   replacing any previous one. HANDLER is called as (funcall HANDLER ev)
+   with the event plist. Returns WIN."
+  (setf (gethash win *pane-handlers*) handler)
+  win)
+
+(defun off-event (win)
+  "Remove WIN's cooperative handler; events for WIN are then dropped.
+   Returns WIN."
+  (remhash win *pane-handlers*)
+  win)
+
+(defun on-global-event (handler)
+  "Add HANDLER to the list invoked for every global event (frame-close,
+   theme-change, menu, eval-buffer). Returns HANDLER."
+  (unless (member handler *global-handlers*)
+    (setq *global-handlers* (cons handler *global-handlers*)))
+  handler)
+
+(defun stop-pane (win)
+  "Cooperative teardown for a pane opened with (on-window …): unregister
+   its handler and close its window. Returns WIN."
+  (off-event win)
+  (close-child win)
+  win)
+
+(defun %event-log (msg)
+  "Best-effort log for the event system. Writes to the iGui log overlay
+   when it's present (the GUI build installs LOG-WRITE); otherwise falls
+   back to standard output, so the routing layer also works headless."
+  (if (fboundp 'log-write)
+      (log-write msg)
+      (progn (princ msg) nil)))
+
+(defun %safe-call-handler (handler ev)
+  "Funcall HANDLER on EV, trapping any Lisp condition so one pane's bug
+   can't take down the central loop or another pane."
+  (handler-case (funcall handler ev)
+    (error (c)
+      (%event-log (format nil "[event] handler error: ~A~%" c)))))
+
+(defun %dispatch-event (ev)
+  "Host entry point — the central event loop calls this once per event.
+   Routes EV to the handler registered for its :child-id; an event with
+   no :child-id (a global) goes to every global handler. Returns nil.
+
+   Called from Rust (igui_mac::shims::dispatch_event); keep the name and
+   one-arg shape stable."
+  (let* ((win (getf ev :child-id))
+         (handler (and win (gethash win *pane-handlers*))))
+    (cond
+      (handler   (%safe-call-handler handler ev))
+      ((null win) (dolist (g *global-handlers*)
+                    (%safe-call-handler g ev))))
+    nil))
+
+(defmacro on-window (window-form &rest clauses)
+  "Register a COOPERATIVE event handler for WINDOW-FORM and return its id.
+
+   CLAUSES use the same (KIND body...) shape as EVENT-LOOP, but instead of
+   looping, the expansion builds a one-shot handler the host's central
+   loop calls once per event for this window. Inside each clause body the
+   event plist is bound to `ev' and the window id to `self'.
+
+   Cooperative contract: a clause body MUST return promptly — it must not
+   call (next-event …) or run its own loop, which would re-monopolise the
+   shared language thread this whole design exists to free up.
+
+   Teardown: (stop-pane self) unregisters and closes; (off-event self)
+   keeps the window but stops handling. A :CLOSE clause that calls
+   stop-pane is auto-added when you don't supply one, so the window's
+   close box just works.
+
+   :FRAME-CLOSE is app-global (the whole IDE quitting) and is handled by
+   the host — register it via (on-global-event …) if you need to observe
+   it, not as an on-window clause.
+
+   Example:
+
+     (let ((id (open-child-sized \"Paint\" 480 360)))
+       (on-window id
+         (:mouse (when (eq (getf ev :op) :left-down)
+                   (dab (getf ev :x) (getf ev :y) id)))
+         (:char  (when (eq (getf ev :char) #\\Escape) (stop-pane self))))
+       id)"
+  (let ((win  (gensym "WIN-"))
+        (evg  (gensym "EV-"))
+        (kind (gensym "K-"))
+        (has-close (some (lambda (c) (eq (car c) :close)) clauses)))
+    `(let ((,win ,window-form))
+       (on-event ,win
+         (lambda (,evg)
+           (let ((,kind (getf ,evg :kind))
+                 (ev    ,evg)
+                 (self  ,win))
+             (cond
+               ,@(unless has-close
+                   (list `((eq ,kind :close) (stop-pane self))))
+               ,@(mapcar
+                   (lambda (clause)
+                     (let ((head (car clause))
+                           (body (cdr clause)))
+                       (if (eq head t)
+                           `(t ,@body)
+                           `((eq ,kind ',head) ,@body))))
+                   clauses)))))
+       ,win)))
 
 (provide 'events)
 nil

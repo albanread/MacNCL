@@ -172,6 +172,41 @@ impl Session {
         ACTIVE_SESSION.with(|c| c.set(self as *mut Session));
     }
 
+    /// Dispatch one iGui event to the Lisp-side cooperative handler
+    /// registered for its target window (via `(on-window …)`). Funcalls
+    /// `%dispatch-event` on this session's mutator and returns whether a
+    /// dispatcher was installed (`false` in `--lean` sessions, which never
+    /// load Library/events).
+    ///
+    /// This is how the host's single central event loop serves an
+    /// arbitrary number of GUI panes: each event is routed here, the
+    /// matching pane handler runs to completion on the one Lisp thread,
+    /// and the loop moves on — no pane ever owns a blocking loop, so none
+    /// can starve the REPL or another pane.
+    ///
+    /// The funcall is bracketed by the same non-local-exit reset +
+    /// condition guard as `eval_value`, so a pane handler that signals or
+    /// escapes is contained: the condition surfaces through the
+    /// handler-case inside `%dispatch-event` rather than aborting the
+    /// process, and a leaked `(return …)` can't poison the next event's
+    /// dispatch with a stale `ABORT_PENDING`.
+    #[cfg(all(target_os = "macos", feature = "mac-gui"))]
+    pub fn dispatch_gui_event(
+        &mut self,
+        ev: ncl_runtime::igui_events::IGuiEvent,
+    ) -> bool {
+        let mutator_ptr = &mut *self.mutator as *mut _;
+        ncl_runtime::abi::reset_nonlocal_exit_state();
+        let guard = ncl_runtime::abi::condition_guard_enter();
+        let dispatched =
+            ncl_runtime::igui_mac::shims::dispatch_event(mutator_ptr, ev);
+        // Discard any condition that escaped the handler — %dispatch-event's
+        // handler-case already reported it; the guard just kept it from
+        // aborting the worker.
+        let _ = ncl_runtime::abi::condition_guard_exit(guard);
+        dispatched
+    }
+
     /// Read every form in `src`, evaluate them in sequence, return
     /// the printed representation of the last value (or `nil` on
     /// empty input). `(defun …)` forms are intercepted and define
@@ -245,6 +280,10 @@ impl Session {
         // This is what lets the REPL keep going after an error, and lets
         // stdlib load report the actual failing form rather than dying
         // with a bare 0xC0000409.
+        // Start each top-level form with a clean non-local-exit state: a
+        // leaked (return …)/throw/loop-break from a prior form would leave
+        // ABORT_PENDING set and make this form early-return before running.
+        ncl_runtime::abi::reset_nonlocal_exit_state();
         let guard = ncl_runtime::abi::condition_guard_enter();
         let jit_result = ncl_llvm::jit_eval(&expr, mutator_ptr);
         if let Some(cond_raw) = ncl_runtime::abi::condition_guard_exit(guard) {
@@ -288,10 +327,9 @@ impl Session {
             self.handle_defasm(&name, &params, &body_lines)?;
             return Ok(());
         }
-        // Macroexpand so we can decide what kind of form this is
-        // AFTER macros run. defstruct-win32, define-win32-callback,
-        // require-with-side-effects, etc. all surface as something
-        // different post-expansion.
+        // Macroexpand so we can decide what kind of form this is AFTER
+        // macros run — e.g. defstruct and require-with-side-effects surface
+        // as something different post-expansion.
         let expanded = macroexpand_all(v, &self.coord, &mut self.mutator)?;
         if let Some(body_forms) = match_top_level_progn(&expanded) {
             for form in body_forms {
@@ -656,8 +694,8 @@ pub(crate) fn compile_function_raw(
         .map_err(EvalError::Jit)?;
 
     startup_timing::push_form(name, lower_elapsed, startup_timing::elapsed(t_jit));
-    #[cfg(windows)]
-    ncl_runtime::igui::splash::tick();
+    // Cross-platform progress (drives the macOS loading bar; no-op otherwise).
+    ncl_runtime::load_progress::tick();
 
     let sym_word = coord.intern(name);
     gc_function::alloc_function_in_static(
@@ -1091,42 +1129,9 @@ fn install_native_functions(
                    ncl_runtime::current_thread_id_shim, 0);
     install_native(coord, mutator, "CURRENT-PROCESS-ID",
                    ncl_runtime::current_process_id_shim, 0);
-    // Windows surface — Phase 1 of docs/WINDOWS_FFI.md.
-    // (windows-enabled-p), (ui-thread-id), (ui-thread-p) are always
-    // installed; they return NIL outside `--windows` mode. The
-    // conditional (when (windows-enabled-p) (require 'win32-threading))
-    // branch in init.lisp uses them to decide whether to pull in the
-    // UI-thread surface.
-    install_native(coord, mutator, "WINDOWS-ENABLED-P",
-                   ncl_runtime::windows_enabled_p_shim, 0);
-    install_native(coord, mutator, "UI-THREAD-ID",
-                   ncl_runtime::ui_thread_id_shim, 0);
-    install_native(coord, mutator, "UI-THREAD-P",
-                   ncl_runtime::ui_thread_p_shim, 0);
-    // (%ui-execute closure) — marshal a 0-arg closure to the UI
-    // thread, block until it returns. The (on-ui-thread BODY) macro
-    // in Lisp/Library/win32-threading.lisp wraps BODY in (lambda ()
-    // …) and calls this. Errors if --windows wasn't passed.
-    install_native(coord, mutator, "%UI-EXECUTE",
-                   ncl_runtime::ui_execute_shim, 1);
-    // (%ffi-call DLL FN ARG-TYPES RETURN-TYPE ARGS…) — the FFI
-    // kernel. Variadic (arity 0 = no compile-time arg-count check);
-    // the shim itself enforces "at least 4 fixed args plus one per
-    // arg-type". Phase 3 of docs/WINDOWS_FFI.md.
-    install_native(coord, mutator, "%FFI-CALL",
-                   ncl_runtime::ffi_call_shim, 0);
-    // (%win32-lookup NAME) -> plist or NIL. Used by (defwin32 …) at
-    // macroexpansion time to bake the signature into a defun. The
-    // metadata pack is loaded by the driver at --windows startup.
-    install_native(coord, mutator, "%WIN32-LOOKUP",
-                   ncl_runtime::win32_lookup_shim, 1);
-    // (%win32-call NAME &rest user-args). Used by (win32 NAME …)
-    // for one-shot dynamic dispatch (no Lisp-side defun generated).
-    install_native(coord, mutator, "%WIN32-CALL",
-                   ncl_runtime::win32_call_shim, 0);
-    // Foreign buffer primitives (Phase 5). The defstruct-win32
-    // macro (Lisp/Library/win32-buffer.lisp) layers offset/size
-    // discipline on top so user code doesn't hand-roll layouts.
+    // Foreign buffer primitives — platform-neutral malloc-backed memory
+    // (read/write/zero of ints, ptrs, wide strings). Used by the canvas
+    // pixel-poke demos; not Windows-specific despite the historical name.
     install_native(coord, mutator, "MAKE-FOREIGN-BUFFER",
                    ncl_runtime::make_foreign_buffer_shim, 1);
     install_native(coord, mutator, "FREE-FOREIGN-BUFFER",
@@ -1173,13 +1178,6 @@ fn install_native_functions(
                    ncl_runtime::buffer_read_wstring_shim, 2);
     install_native(coord, mutator, "BUFFER-WRITE-WSTRING",
                    ncl_runtime::buffer_write_wstring_shim, 3);
-    // (%make-win32-callback CLOSURE ARITY) — Phase 6. Registers
-    // CLOSURE in the runtime's callback registry and JIT-emits a
-    // trampoline that Win32 can call directly. Returns the
-    // trampoline's machine-code address as a fixnum, ready to
-    // store in a WNDCLASSEXW.lpfnWndProc slot or similar.
-    install_native(coord, mutator, "%MAKE-WIN32-CALLBACK",
-                   ncl_llvm::make_win32_callback_shim, 2);
     install_native(coord, mutator, "ALLOCATE-CRITICAL-SECTION",
                    ncl_runtime::allocate_critical_section_shim, 0);
     install_native(coord, mutator, "DEALLOCATE-CRITICAL-SECTION",
@@ -1246,11 +1244,8 @@ fn install_native_functions(
     install_native(coord, mutator, "CONDVAR-BROADCAST",
                    ncl_runtime::condvar_broadcast_shim, 1);
 
-    // iGui (Windows only). Spawns the GUI thread and exposes the
-    // window-management trio + event poll. Drawing primitives
-    // come in a follow-up commit.
-    #[cfg(windows)]
-    install_igui(coord, mutator);
+    // iGui — the macOS Core Graphics backend (window management, drawing
+    // primitives, event poll). Installed when the mac-gui feature is on.
     #[cfg(all(target_os = "macos", feature = "mac-gui"))]
     install_igui_mac(coord, mutator);
 
@@ -1493,16 +1488,13 @@ extern "C-unwind" fn load_file_shim(
         }
     };
 
-    // Update the splash with the module name (file stem, e.g. "streams").
-    #[cfg(windows)]
-    {
-        let stem = std::path::Path::new(&path)
-            .file_stem()
-            .and_then(|s| s.to_str())
-            .unwrap_or(&path)
-            .to_string();
-        ncl_runtime::igui::splash::set_module(&stem);
-    }
+    // Module name (file stem, e.g. "streams") for the startup load UIs.
+    let stem = std::path::Path::new(&path)
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or(&path)
+        .to_string();
+    ncl_runtime::load_progress::set_phase(&stem);
 
     let session_ptr = ACTIVE_SESSION.with(|c| c.get());
     if session_ptr.is_null() {
@@ -1865,135 +1857,6 @@ fn install_igui_mac(coord: &Arc<GcCoordinator>, mutator: &mut MutatorState) {
     install_native(coord, mutator, "%EMIT-DRAW-ARC", rt::emit_draw_arc_shim, 7);
 }
 
-#[cfg(windows)]
-fn install_igui(coord: &Arc<GcCoordinator>, mutator: &mut MutatorState) {
-    install_native(coord, mutator, "IGUI-START",
-                   ncl_runtime::igui_start_shim, 0);
-    install_native(coord, mutator, "IGUI-WAIT",
-                   ncl_runtime::igui_wait_shim, 0);
-    install_native(coord, mutator, "IGUI-QUIT",
-                   ncl_runtime::igui_quit_shim, 0);
-    install_native(coord, mutator, "OPEN-CHILD",
-                   ncl_runtime::open_child_shim, 1);
-    install_native(coord, mutator, "OPEN-CHILD-SIZED",
-                   ncl_runtime::open_child_sized_shim, 3);
-    install_native(coord, mutator, "CLOSE-CHILD",
-                   ncl_runtime::close_child_shim, 1);
-    install_native(coord, mutator, "SET-TITLE",
-                   ncl_runtime::set_title_shim, 2);
-    install_native(coord, mutator, "NEXT-EVENT",
-                   ncl_runtime::next_event_shim, 1);
-    install_native(coord, mutator, "NEXT-EVENT-FOR",
-                   ncl_runtime::next_event_for_shim, 2);
-    install_native(coord, mutator, "FILTER-ON-WINDOW",
-                   ncl_runtime::filter_on_window_shim, 1);
-    install_native(coord, mutator, "UNFILTER-WINDOW",
-                   ncl_runtime::unfilter_window_shim, 1);
-    install_native(coord, mutator, "CLEAR-EVENT-FILTER",
-                   ncl_runtime::clear_event_filter_shim, 0);
-    install_native(coord, mutator, "DISCARD-STASHED-EVENTS",
-                   ncl_runtime::discard_stashed_events_shim, 0);
-    install_native(coord, mutator, "SET-REDRAW-RATE",
-                   ncl_runtime::set_redraw_rate_shim, 2);
-
-    // Drawing primitives. The user-Lisp `with-batch` macro wraps
-    // begin/submit; the emit-* helpers push commands onto the
-    // thread-local current batch.
-    install_native(coord, mutator, "%BEGIN-BATCH",
-                   ncl_runtime::begin_batch_shim, 1);
-    install_native(coord, mutator, "%SUBMIT-BATCH",
-                   ncl_runtime::submit_batch_shim, 0);
-    install_native(coord, mutator, "%EMIT-CLEAR",
-                   ncl_runtime::emit_clear_shim, 1);
-    install_native(coord, mutator, "%EMIT-FILL-RECT",
-                   ncl_runtime::emit_fill_rect_shim, 5);
-    install_native(coord, mutator, "%EMIT-STROKE-RECT",
-                   ncl_runtime::emit_stroke_rect_shim, 6);
-    install_native(coord, mutator, "%EMIT-DRAW-LINE",
-                   ncl_runtime::emit_draw_line_shim, 6);
-    install_native(coord, mutator, "%EMIT-DRAW-TEXT",
-                   ncl_runtime::emit_draw_text_shim, 5);
-    install_native(coord, mutator, "%EMIT-DRAW-TEXT-STYLED",
-                   ncl_runtime::emit_draw_text_styled_shim, 6);
-    install_native(coord, mutator, "%MEASURE-TEXT",
-                   ncl_runtime::measure_text_shim, 4);
-    install_native(coord, mutator, "%EMIT-FILL-OVAL",
-                   ncl_runtime::emit_fill_oval_shim, 5);
-    install_native(coord, mutator, "%EMIT-STROKE-OVAL",
-                   ncl_runtime::emit_stroke_oval_shim, 6);
-    install_native(coord, mutator, "%EMIT-FILL-CIRCLE",
-                   ncl_runtime::emit_fill_circle_shim, 4);
-    install_native(coord, mutator, "%EMIT-STROKE-CIRCLE",
-                   ncl_runtime::emit_stroke_circle_shim, 5);
-    install_native(coord, mutator, "%EMIT-DRAW-ARC",
-                   ncl_runtime::emit_draw_arc_shim, 7);
-
-    // Log view bridge.
-    install_native(coord, mutator, "LOG-WRITE",
-                   ncl_runtime::log_write_shim, 1);
-
-    // Text-view (terminal-style monospaced child).
-    install_native(coord, mutator, "OPEN-TEXT-WINDOW",
-                   ncl_runtime::open_text_window_shim, 1);
-    install_native(coord, mutator, "TEXT-WRITE",
-                   ncl_runtime::text_write_shim, 2);
-    install_native(coord, mutator, "TEXT-WRITE-CHAR",
-                   ncl_runtime::text_write_char_shim, 2);
-    install_native(coord, mutator, "TEXT-CLEAR",
-                   ncl_runtime::text_clear_shim, 1);
-    install_native(coord, mutator, "TEXT-CLEAR-EOL",
-                   ncl_runtime::text_clear_eol_shim, 1);
-    install_native(coord, mutator, "TEXT-CLEAR-EOS",
-                   ncl_runtime::text_clear_eos_shim, 1);
-    install_native(coord, mutator, "TEXT-NEWLINE",
-                   ncl_runtime::text_newline_shim, 1);
-    install_native(coord, mutator, "TEXT-SCROLL-UP",
-                   ncl_runtime::text_scroll_up_shim, 2);
-    install_native(coord, mutator, "TEXT-SET-CURSOR",
-                   ncl_runtime::text_set_cursor_shim, 3);
-    install_native(coord, mutator, "TEXT-SET-PEN",
-                   ncl_runtime::text_set_pen_shim, 3);
-    install_native(coord, mutator, "TEXT-RESET-PEN",
-                   ncl_runtime::text_reset_pen_shim, 1);
-    install_native(coord, mutator, "TEXT-SHOW-CARET",
-                   ncl_runtime::text_show_caret_shim, 2);
-
-    // REPL child
-    install_native(coord, mutator, "OPEN-REPL-WINDOW",
-                   ncl_runtime::open_repl_window_shim, 1);
-    install_native(coord, mutator, "REPL-OUTPUT",
-                   ncl_runtime::repl_output_shim, 2);
-    install_native(coord, mutator, "REPL-ERROR",
-                   ncl_runtime::repl_error_shim, 2);
-    install_native(coord, mutator, "REPL-POP-INPUT",
-                   ncl_runtime::repl_pop_input_shim, 1);
-
-    // Doc pane — Markdown + Mermaid renderer.
-    install_native(coord, mutator, "OPEN-DOC-WINDOW",
-                   ncl_runtime::open_doc_window_shim, 1);
-    install_native(coord, mutator, "DOC-SET-MARKDOWN",
-                   ncl_runtime::doc_set_markdown_shim, 2);
-    install_native(coord, mutator, "DOC-APPEND-MARKDOWN",
-                   ncl_runtime::doc_append_markdown_shim, 2);
-
-    // Canvas — host-owned BGRA32 framebuffer with fast pixel-direct
-    // writes from Lisp. CANVAS-OPEN returns the buffer base address;
-    // poke pixels with BUFFER-SET-U32 then CANVAS-PRESENT to draw.
-    install_native(coord, mutator, "CANVAS-OPEN",
-                   ncl_runtime::canvas_open_shim, 3);
-    install_native(coord, mutator, "CANVAS-PRESENT",
-                   ncl_runtime::canvas_present_shim, 1);
-
-    // MDI window-management verbs (incl. arranging minimized-child
-    // icons when a window is maximized/full within the frame).
-    install_native(coord, mutator, "MDI-ARRANGE-ICONS",
-                   ncl_runtime::mdi_arrange_icons_shim, 0);
-    install_native(coord, mutator, "MDI-CASCADE",
-                   ncl_runtime::mdi_cascade_shim, 0);
-    install_native(coord, mutator, "MDI-TILE",
-                   ncl_runtime::mdi_tile_shim, 0);
-}
-
 fn install_native(
     coord: &Arc<GcCoordinator>,
     mutator: &mut MutatorState,
@@ -2046,8 +1909,7 @@ impl Session {
     }
 
     pub fn load_core_stdlib(&mut self) -> Result<(), EvalError> {
-        #[cfg(windows)]
-        ncl_runtime::igui::splash::set_module("core");
+        ncl_runtime::load_progress::set_phase("core");
         let t = startup_timing::now();
         self.eval(CORE_LISP_SOURCE)?;
         startup_timing::drain_and_report("core.lisp", startup_timing::elapsed(t));
@@ -2059,8 +1921,7 @@ impl Session {
     /// labels, etc.). Idempotent in the same trivial sense as
     /// `load_core_stdlib`.
     pub fn load_clos(&mut self) -> Result<(), EvalError> {
-        #[cfg(windows)]
-        ncl_runtime::igui::splash::set_module("clos");
+        ncl_runtime::load_progress::set_phase("clos");
         let t = startup_timing::now();
         self.eval(CLOS_LISP_SOURCE)?;
         startup_timing::drain_and_report("clos.lisp", startup_timing::elapsed(t));

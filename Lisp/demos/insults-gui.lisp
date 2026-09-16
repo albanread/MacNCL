@@ -97,13 +97,11 @@
      (text-newline *insults-id*)
      ;; Open with one so the window isn't empty.
      (write-insult)
-     (event-loop-for *insults-id*
-       (:frame-close (return :done))
-       (:close       (return :done))
+     (on-window *insults-id*
        (:mouse       (when (eq (getf ev :op) :left-down)
                        (write-insult)))
        (:char        (let ((ch (getf ev :char)))
                        (cond
                          ((or (eq ch #\q) (eq ch #\Q))
-                          (return :done))
+                          (stop-pane *insults-id*))
                          (t (write-insult)))))))))

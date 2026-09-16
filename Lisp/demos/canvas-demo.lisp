@@ -52,9 +52,7 @@
           (draw-plasma *cv-base* *cv-w* *cv-h* 0)
           (canvas-present id)
           (set-redraw-rate id 33)
-          (event-loop-for id
-            (:frame-close (return :done))
-            (:close       (return :done))
+          (on-window id
             (:tick        (setq *cv-tick* (+ *cv-tick* 2))
                           (draw-plasma *cv-base* *cv-w* *cv-h* *cv-tick*)
                           (canvas-present id)))))))))

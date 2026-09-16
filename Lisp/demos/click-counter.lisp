@@ -56,9 +56,7 @@
       (t
        (paint-click-counter id count)
        (format t "[counter] window open; clicks = 0~%")
-       (event-loop-for id
-         (:frame-close (return :done))
-         (:close       (return :done))
+       (on-window id
          (:mouse       (when (eq (getf ev :op) :LEFT-DOWN)
                          (setq count (+ count 1))
                          (paint-click-counter id count)

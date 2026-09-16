@@ -44,51 +44,8 @@ ryu = "1.0"
 # on macOS.
 notify = "8"
 
-# Windows-only iGui dependency surface — Direct2D / Direct3D 11 /
-# DirectWrite plus the Win32 windowing layer. Versions tracked
-# against the sister NewCP repo to keep the iGui port up to date.
-
-[target.'cfg(windows)'.dependencies]
-windows-numerics = "0.3"
-# NewAudio — sibling project (out-of-repo). Windows-only; the
-# cfg(not(windows)) stub backend in src/audio.rs makes the dep
-# unnecessary off-Windows. Removed in MacNCL (hard fork) because the
-# path points outside the repo and Cargo must resolve it even on macOS.
-# Reinstate behind a real path/vendor if a Windows MacNCL build is wanted.
-# newaudio = { path = "../../../../NewAudio/NewAudio/crates/newaudio" }
-# docpane — Direct2D markdown + Mermaid render core, vendored from
-# NewFactor's `crates/docpane`. Powers `igui::doc_pane` (in-window
-# pane type) and the headless `doc-crate` snapshot tool. Windows-only
-# because the renderer targets Direct2D / DirectWrite.
-docpane = { path = "../../crates/docpane" }
-
-[target.'cfg(windows)'.dependencies.windows]
-version = "0.62"
-features = [
-    "Win32_Foundation",
-    "Win32_Graphics_Direct2D",
-    "Win32_Graphics_Direct2D_Common",
-    "Win32_Graphics_Direct3D",
-    "Win32_Graphics_Direct3D11",
-    "Win32_Graphics_DirectWrite",
-    "Win32_Graphics_Dxgi",
-    "Win32_Graphics_Dxgi_Common",
-    "Win32_Graphics_Gdi",
-    "Win32_System_Com",
-    "Win32_System_LibraryLoader",
-    "Win32_System_Performance",
-    "Win32_System_Threading",
-    "Win32_UI_HiDpi",
-    "Win32_UI_WindowsAndMessaging",
-    "Win32_UI_Input_KeyboardAndMouse",
-    "Win32_UI_Controls",
-    "Win32_UI_Controls_Dialogs",
-    "Win32_System_DataExchange",
-    "Win32_System_Diagnostics_Debug",
-    "Win32_System_Kernel",
-    "Win32_System_Memory",
-    "Win32_System_Ole",
-]
+# (The Windows iGui dependency surface — Direct2D/DirectWrite/Win32 + the
+# docpane render core — was removed with the Windows backend. macOS-only.)
 
 [[example]]
 name = "mac_window"

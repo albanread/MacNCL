@@ -36,9 +36,7 @@
      ;; installed handler) plus log every other kind we see, so a
      ;; failure shows up either as missing events or as wrong-kind
      ;; events.
-     (event-loop-for *probe-id*
-       (:frame-close (return :done))
-       (:close       (return :done))
+     (on-window *probe-id*
        (:eval-buffer (setq *eval-count* (+ *eval-count* 1))
                      (let ((src (getf ev :source)))
                        (log-write

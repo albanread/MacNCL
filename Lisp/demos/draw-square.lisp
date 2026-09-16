@@ -57,9 +57,7 @@
        :failed)
       (t
        (paint-shapes id 480 360)
-       (event-loop-for id
-         (:frame-close (return :done))
-         (:close       (return :done))
+       (on-window id
          (:resize      (paint-shapes id
                                      (getf ev :width)
                                      (getf ev :height))))))))
