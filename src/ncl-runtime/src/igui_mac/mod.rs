@@ -16,6 +16,7 @@
 //!
 //! See docs/PORTING_DESIGN.md §4.5–4.6.
 
+pub mod anim;
 pub mod events;
 pub mod ide;
 /// The system menu bar (registry + NSMenu install). The registry half is

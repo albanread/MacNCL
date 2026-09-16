@@ -29,8 +29,10 @@ use objc2::MainThreadMarker;
 use objc2_app_kit::{
     NSApplication, NSApplicationActivationPolicy, NSBackingStoreType, NSEvent, NSEventMask,
     NSEventType, NSImage, NSImageScaling, NSImageView, NSPasteboardType, NSPasteboardTypeFileURL,
-    NSAutoresizingMaskOptions, NSView, NSWindow, NSWindowStyleMask,
+    NSAutoresizingMaskOptions, NSCursor, NSView, NSWindow, NSWindowStyleMask, NSWorkspace,
 };
+
+use crate::igui_mac::anim::{cursor_shape_for, CursorHints, CursorShape};
 use objc2_core_graphics::CGImage;
 use objc2_foundation::{NSPoint, NSRect, NSSize, NSString, NSTimer};
 
@@ -74,6 +76,61 @@ fn system_font_resolver(
 
 /// The IDE / main window's id.
 pub const MAIN_ID: i64 = 1;
+
+// ── Feel-pass plumbing: cursor hints + animation ticks ─────────────────
+//
+// The worker publishes the IDE's pane geometry (for the cursor hit test)
+// and a wake deadline; the main-thread timer posts a `Tick` for the IDE
+// when the deadline passes so blink/scroll animations advance. Idle time
+// costs zero wakeups (deadline unset).
+
+static CURSOR_HINTS: std::sync::RwLock<CursorHints> = std::sync::RwLock::new(CursorHints {
+    header_y: 0.0,
+    divider_y: 0.0,
+    height: 0.0,
+});
+
+/// Worker-callable: publish the IDE's current pane geometry.
+pub fn set_cursor_hints(h: CursorHints) {
+    *CURSOR_HINTS.write().unwrap_or_else(|e| e.into_inner()) = h;
+}
+
+static ANIM_DEADLINE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The system Reduce Motion preference, latched at startup (the worker
+/// reads it once to configure the scroll easing).
+static REDUCE_MOTION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn reduce_motion_pref() -> bool {
+    REDUCE_MOTION.load(Ordering::Relaxed)
+}
+static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
+
+/// Milliseconds since the GUI started (shared worker/main clock).
+pub fn now_ms() -> u128 {
+    EPOCH
+        .get()
+        .map(|t| t.elapsed().as_millis())
+        .unwrap_or(0)
+}
+
+/// Worker-callable: ask the main thread to post an animation tick for the
+/// IDE at `at_ms` (0 cancels). The driver re-arms after each pump.
+pub fn request_ide_tick(at_ms: u64) {
+    ANIM_DEADLINE_MS.store(at_ms, Ordering::Relaxed);
+}
+
+fn set_ns_cursor(shape: CursorShape) {
+    // SAFETY: class-method cursors are live for the process; `set` makes
+    // ours current until the next `set`/`invalidate`.
+    unsafe {
+        match shape {
+            CursorShape::Arrow => NSCursor::arrowCursor().set(),
+            CursorShape::IBeam => NSCursor::IBeamCursor().set(),
+            CursorShape::ResizeUpDown => NSCursor::resizeUpDownCursor().set(),
+        }
+    }
+}
 
 // ── Worker → main-thread command queue ────────────────────────────────
 
@@ -567,6 +624,12 @@ where
 {
     let mtm = MainThreadMarker::new()
         .ok_or_else(|| "igui_mac::run must be called on the main thread".to_string())?;
+    let _ = EPOCH.set(std::time::Instant::now());
+    // Latch accessibility preferences the feel pass honors.
+    REDUCE_MOTION.store(
+        NSWorkspace::sharedWorkspace().accessibilityDisplayShouldReduceMotion(),
+        Ordering::Relaxed,
+    );
 
     igui_events::install();
 
@@ -680,6 +743,14 @@ where
                 unsafe { app_t.terminate(None) };
             }
         }
+        // Animation wake: post a Tick for the IDE when the worker's
+        // deadline passes, then clear it (the worker re-arms in its pump).
+        let deadline = ANIM_DEADLINE_MS.load(Ordering::Relaxed);
+        if deadline != 0 && now_ms() >= deadline as u128 {
+            ANIM_DEADLINE_MS.store(0, Ordering::Relaxed);
+            igui_events::push(IGuiEvent::Tick { child_id: MAIN_ID, time_ms: 0 });
+        }
+
         if QUIT_REQUESTED.swap(false, Ordering::Relaxed) {
             // Graceful quit (NCL_GUI_QUIT_AFTER_MS): stop the worker, wait
             // for it to leave the JIT, then terminate. See `worker_handle`.
@@ -720,6 +791,14 @@ where
             let id = m.id_for_event(e);
             (id, m.height_of(id))
         };
+        // Cursor shape follows the pointer over the IDE window (arrow over
+        // chrome, I-beam over the panes, ↕ at the divider).
+        if id == MAIN_ID && e.r#type() == NSEventType::MouseMoved {
+            let p: NSPoint = e.locationInWindow();
+            let y = ev::to_top_left_y(p.y, h) as f32;
+            let hints = *CURSOR_HINTS.read().unwrap_or_else(|er| er.into_inner());
+            set_ns_cursor(cursor_shape_for(y, &hints));
+        }
         dispatch_event(e, id, h);
         event.as_ptr()
     });

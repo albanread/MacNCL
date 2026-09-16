@@ -11,6 +11,7 @@
 //! same dispatcher the keyboard shortcuts use.
 
 use crate::igui_events::{menu_cmd, modifier, IGuiEvent};
+use crate::igui_mac::anim::{CaretBlink, CursorHints, CursorShape, ScrollEase};
 use crate::igui_mac::events::vk;
 use crate::igui_mac::ide::editor::{Editor, Theme};
 use crate::igui_mac::ide::repl::Repl;
@@ -139,6 +140,19 @@ pub struct Ide {
     dragging_split: bool,
     width: f32,
     height: f32,
+    // ── feel pass ──
+    blink: CaretBlink,
+    scroll_ease: ScrollEase,
+    /// Which pane the last wheel event hovered (editor = true).
+    wheel_over_editor: bool,
+    /// Consecutive-click tracking (same point ⇒ double/triple).
+    click_count: u8,
+    last_click: (f32, f32),
+    /// True while the worker is evaluating (status-bar ●).
+    busy: bool,
+    /// The driver's clock at the last animate/input — blink re-arm needs
+    /// *some* timestamp; tests drive it directly.
+    now_ms: u128,
 }
 
 /// How close (px) to the divider a click must land to start a drag.
@@ -183,6 +197,13 @@ impl Ide {
             dragging_split: false,
             width: 900.0,
             height: 620.0,
+            blink: CaretBlink::new(0),
+            scroll_ease: ScrollEase::new(0),
+            wheel_over_editor: true,
+            click_count: 0,
+            last_click: (f32::MIN, f32::MIN),
+            busy: false,
+            now_ms: 0,
         }
     }
 
@@ -231,14 +252,99 @@ impl Ide {
     }
 
     /// Set whether the IDE window is the key window. Inactive windows dim
-    /// labels one tier and hide carets (native Mac behaviour).
+    /// labels one tier and hide the caret (native Mac behaviour).
     pub fn set_active(&mut self, active: bool) {
         self.window_active = active;
-        let show = active;
+        self.sync_carets();
+    }
+
+    /// Set while the worker evaluates — shows the ● indicator.
+    pub fn set_busy(&mut self, busy: bool) {
+        self.busy = busy;
+    }
+
+    /// Honor the system Reduce Motion preference (no scroll tail).
+    pub fn set_reduce_motion(&mut self, on: bool) {
+        self.scroll_ease.set_reduce_motion(on);
+    }
+
+    /// Caret visibility = window active ∧ pane focused ∧ blink on.
+    fn sync_carets(&mut self) {
+        let blink_on = self.blink.visible();
+        let ed_on = self.window_active && blink_on && matches!(self.focus, Focus::Editor);
+        let repl_on = self.window_active && blink_on && matches!(self.focus, Focus::Repl);
         for b in &mut self.buffers {
-            b.set_show_caret(show);
+            b.set_show_caret(ed_on);
         }
-        self.repl.set_show_caret(show);
+        self.repl.set_show_caret(repl_on);
+    }
+
+    fn set_focus(&mut self, f: Focus) {
+        self.focus = f;
+        self.sync_carets();
+    }
+
+    /// Advance the feel-pass animations (blink + scroll release). Returns
+    /// true when something changed and a re-render is due.
+    pub fn animate(&mut self, now_ms: u128) -> bool {
+        self.now_ms = self.now_ms.max(now_ms);
+        let mut changed = self.blink.advance(now_ms);
+        let lines = self.scroll_ease.step(now_ms);
+        if lines != 0 {
+            if self.wheel_over_editor {
+                self.ed_mut().scroll(lines);
+            } else {
+                self.repl.scroll_lines(-lines);
+            }
+            changed = true;
+        }
+        if changed {
+            self.sync_carets();
+        }
+        changed
+    }
+
+    /// When the main thread should post the next animation tick, if ever.
+    pub fn next_wake_ms(&self, now_ms: u128) -> Option<u128> {
+        let mut wake = None;
+        if self.scroll_ease.pending() > 0.001 {
+            wake = Some(now_ms + 16);
+        }
+        if self.window_active {
+            if let Some(next) = self.blink.next_change_ms() {
+                wake = Some(wake.map_or(next, |w: u128| w.min(next)));
+            }
+        }
+        wake
+    }
+
+    /// A wheel event feeds the momentum buffer (Reduce Motion applies it
+    /// whole). The hovered pane remembers where the lines go.
+    fn feed_wheel(&mut self, y: f32, lines: f32) {
+        self.wheel_over_editor = y < self.editor_area().y1;
+        let now = self.now_ms;
+        let immediate = self.scroll_ease.feed(lines, now);
+        if immediate != 0 {
+            if self.wheel_over_editor {
+                self.ed_mut().scroll(immediate);
+            } else {
+                self.repl.scroll_lines(-immediate);
+            }
+        }
+    }
+
+    /// Geometry for the main thread's cursor hit test.
+    pub fn layout_hints(&self) -> CursorHints {
+        CursorHints {
+            header_y: self.header_h(),
+            divider_y: (self.height * self.split).round(),
+            height: self.height,
+        }
+    }
+
+    /// The shape the window should show at a point (test seam).
+    pub fn cursor_shape_at(&self, y: f32) -> CursorShape {
+        crate::igui_mac::anim::cursor_shape_for(y, &self.layout_hints())
     }
 
     #[inline]
@@ -278,7 +384,7 @@ impl Ide {
         e.set_metrics(self.cell_w, self.cell_h, self.ascent);
         self.buffers.push(e);
         self.active = self.buffers.len() - 1;
-        self.focus = Focus::Editor;
+        self.set_focus(Focus::Editor);
     }
 
     fn close_buffer(&mut self) {
@@ -291,7 +397,7 @@ impl Ide {
     fn switch_to(&mut self, i: usize) {
         if i < self.buffers.len() {
             self.active = i;
-            self.focus = Focus::Editor;
+            self.set_focus(Focus::Editor);
         }
     }
 
@@ -306,7 +412,7 @@ impl Ide {
         }
         match self.ed_mut().load_file(path) {
             Ok(()) => {
-                self.focus = Focus::Editor;
+                self.set_focus(Focus::Editor);
                 self.repl.info(&format!("; loaded {path}"));
             }
             Err(e) => self.repl.error(&format!("open {path}: {e}")),
@@ -403,7 +509,7 @@ impl Ide {
             }
             MenuCmd::RunBuffer => self.run_buffer(),
             MenuCmd::EvalForm => {
-                self.focus = Focus::Editor;
+                self.set_focus(Focus::Editor);
                 self.eval_form_at_point()
             }
             MenuCmd::ClearRepl => {
@@ -411,11 +517,11 @@ impl Ide {
                 IdeAction::None
             }
             MenuCmd::FocusEditor => {
-                self.focus = Focus::Editor;
+                self.set_focus(Focus::Editor);
                 IdeAction::None
             }
             MenuCmd::FocusRepl => {
-                self.focus = Focus::Repl;
+                self.set_focus(Focus::Repl);
                 IdeAction::None
             }
             MenuCmd::FontUp => self.step_font_size(1.0),
@@ -515,7 +621,7 @@ impl Ide {
             IGuiEvent::SaveAs { path } => {
                 match self.ed_mut().save_to(path) {
                     Ok(()) => {
-                        self.focus = Focus::Editor;
+                        self.set_focus(Focus::Editor);
                         menu::record_recent(path);
                         self.repl.info(&format!("; saved {path}"));
                     }
@@ -523,8 +629,14 @@ impl Ide {
                 }
                 IdeAction::None
             }
-            IGuiEvent::Key { vkey, mods, down, .. } if *down => self.on_key(*vkey, *mods),
+            IGuiEvent::Key { vkey, mods, down, .. } if *down => {
+                self.blink.on_input(self.now_ms);
+                self.sync_carets();
+                self.on_key(*vkey, *mods)
+            }
             IGuiEvent::Char { codepoint, .. } => {
+                self.blink.on_input(self.now_ms);
+                self.sync_carets();
                 match self.focus {
                     Focus::Editor => {
                         self.ed_mut().on_char(*codepoint as u32);
@@ -535,23 +647,44 @@ impl Ide {
                 }
                 IdeAction::None
             }
-            IGuiEvent::Mouse { x, y, op, .. } => {
+            IGuiEvent::Mouse { x, y, op, wheel_lines, .. } => {
                 use crate::igui_events::mouse_op;
                 let (mx, my) = (*x as f32, *y as f32);
                 let down = *op == mouse_op::LEFT_DOWN;
                 let drag = *op == mouse_op::DRAG;
                 let up = *op == mouse_op::LEFT_UP;
 
+                // ── wheel: feed the momentum buffer (Reduce Motion applies
+                // whole); released lines land on the hovered pane in animate.
+                if *op == mouse_op::WHEEL {
+                    self.feed_wheel(my, *wheel_lines as f32);
+                    return IdeAction::None;
+                }
+
+                // ── consecutive clicks (double/triple) ──
+                if down {
+                    let same = (mx - self.last_click.0).abs() < 4.0
+                        && (my - self.last_click.1).abs() < 4.0;
+                    self.click_count = if same { (self.click_count + 1).min(3) } else { 1 };
+                    self.last_click = (mx, my);
+                }
+
                 // ── splitter drag ──
                 // Grab the editor/REPL divider on a down within SPLIT_GRAB px,
                 // track it through DRAG, release on UP. While dragging, the
-                // event never reaches a pane.
+                // event never reaches a pane. A double-click resets to the
+                // default split.
                 let div = (self.height * self.split).round();
                 if up {
                     self.dragging_split = false;
                     return IdeAction::None;
                 }
                 if down && (my - div).abs() <= SPLIT_GRAB && my > self.header_h() {
+                    if self.click_count >= 2 {
+                        self.split = 0.62;
+                        self.dragging_split = false;
+                        return IdeAction::None;
+                    }
                     self.dragging_split = true;
                     return IdeAction::None;
                 }
@@ -577,11 +710,12 @@ impl Ide {
                     return IdeAction::None;
                 }
                 if down {
-                    self.focus = if my < self.editor_area().y1 {
+                    let f = if my < self.editor_area().y1 {
                         Focus::Editor
                     } else {
                         Focus::Repl
                     };
+                    self.set_focus(f);
                 }
                 match self.focus {
                     Focus::Repl => {
@@ -590,7 +724,13 @@ impl Ide {
                     Focus::Editor => {
                         let area = self.editor_area();
                         if down {
-                            self.ed_mut().on_click(mx, my, area, false);
+                            // Click count drives the selection granularity:
+                            // 1 caret, 2 word, 3 enclosing top-level form.
+                            match self.click_count {
+                                2 => self.ed_mut().select_word_at(mx, my, area),
+                                3 => self.ed_mut().select_form_at(mx, my, area),
+                                _ => self.ed_mut().on_click(mx, my, area, false),
+                            }
                         } else if drag {
                             self.ed_mut().on_click(mx, my, area, true);
                         }
@@ -609,11 +749,11 @@ impl Ide {
         if cmd {
             match vkey {
                 0x45 => {
-                    self.focus = Focus::Editor;
+                    self.set_focus(Focus::Editor);
                     return IdeAction::None;
                 } // Cmd-E
                 0x4C => {
-                    self.focus = Focus::Repl;
+                    self.set_focus(Focus::Repl);
                     return IdeAction::None;
                 } // Cmd-L
                 0x54 => {
@@ -787,6 +927,12 @@ impl Ide {
             self.tier(s.text_secondary, s.text_tertiary),
             11.0,
         ));
+        // Eval-busy indicator: a dot at the status bar's right edge while
+        // the worker is compiling — today you can't tell a long eval from
+        // a hang without it.
+        if self.busy {
+            cmds.push(self.run("●".into(), self.width - 20.0, sa.y0 + 2.0, s.accent, 11.0));
+        }
 
         // ── REPL pane ──
         for c in self.repl.render(ra) {
@@ -1301,6 +1447,148 @@ mod tests {
         assert!(matches!(ide.focus, Focus::Editor), "open focuses the editor");
         assert!(menu::recent_paths().iter().any(|p| p.ends_with("ncl_open_event.lisp")));
         let _ = std::fs::remove_file(&dir);
+    }
+
+    // ── Sprint 6: feel pass ────────────────────────────────────────────
+
+    /// Triple-click selects the enclosing **top-level** form — clicking
+    /// inside the second defun selects exactly that defun.
+    #[test]
+    fn triple_click_selects_enclosing_top_level_form() {
+        use crate::igui_events::mouse_op;
+        let mut ide = Ide::new(fixed_dark());
+        ide.set_metrics(8.0, 16.0, 12.0);
+        ide.set_focus(Focus::Editor);
+        ide.ed_mut().set_text("(defun a () 1)\n\n(defun b () (* 2 2))");
+        ide.render(Rect { x0: 0.0, y0: 0.0, x1: 1000.0, y1: 680.0 });
+        // Row 2 (third line), a few columns into "(defun b …".
+        let y = ide.header_h() + 2.0 * 16.0 + 4.0;
+        let x = 60.0 + 3.0 * 8.0;
+        for _ in 0..3 {
+            ide.handle_event(&mouse(mouse_op::LEFT_DOWN, x, y));
+            ide.handle_event(&mouse(mouse_op::LEFT_UP, x, y));
+        }
+        assert_eq!(ide.ed().selected_text(), "(defun b () (* 2 2))");
+    }
+
+    /// Double-click selects the word under the click.
+    #[test]
+    fn word_click_selects_word() {
+        use crate::igui_events::mouse_op;
+        let mut ide = Ide::new(fixed_dark());
+        ide.set_metrics(8.0, 16.0, 12.0);
+        ide.set_focus(Focus::Editor);
+        // Scratch buffer line 0: ";; Scratch — …"; line 4: "(defun square (x)".
+        ide.render(Rect { x0: 0.0, y0: 0.0, x1: 1000.0, y1: 680.0 });
+        // "square" starts at col 8 on line 4 (1-indexed gutter ≈ 4.5 cells).
+        let y = ide.header_h() + 4.0 * 16.0 + 4.0;
+        let x = (4.5 * 8.0) + 9.0 * 8.0;
+        for _ in 0..2 {
+            ide.handle_event(&mouse(mouse_op::LEFT_DOWN, x, y));
+            ide.handle_event(&mouse(mouse_op::LEFT_UP, x, y));
+        }
+        assert_eq!(ide.ed().selected_text(), "square");
+    }
+
+    /// Drag the split, then double-click the divider → back to 0.62.
+    #[test]
+    fn divider_double_click_resets_split() {
+        use crate::igui_events::mouse_op;
+        let mut ide = Ide::new(fixed_dark());
+        ide.set_metrics(8.0, 16.0, 12.0);
+        ide.render(Rect { x0: 0.0, y0: 0.0, x1: 900.0, y1: 620.0 });
+        let div = (ide.height * ide.split).round();
+        ide.handle_event(&mouse(mouse_op::LEFT_DOWN, 450.0, div));
+        ide.handle_event(&mouse(mouse_op::DRAG, 450.0, 0.30 * 620.0));
+        ide.handle_event(&mouse(mouse_op::LEFT_UP, 450.0, 0.30 * 620.0));
+        assert!((ide.split - 0.30).abs() < 0.02);
+        // Double-click at the (moved) divider.
+        let div = (ide.height * ide.split).round();
+        ide.handle_event(&mouse(mouse_op::LEFT_DOWN, 450.0, div));
+        ide.handle_event(&mouse(mouse_op::LEFT_UP, 450.0, div));
+        ide.handle_event(&mouse(mouse_op::LEFT_DOWN, 450.0, div));
+        assert!((ide.split - 0.62).abs() < 1e-6, "double-click resets, got {}", ide.split);
+    }
+
+    /// Wheel → momentum buffer → lines land on the editor over successive
+    /// animate steps; the total is conserved.
+    #[test]
+    fn wheel_scrolls_the_editor_with_momentum() {
+        let mut ide = Ide::new(fixed_dark());
+        ide.set_metrics(8.0, 16.0, 12.0);
+        let body: String = (0..200).map(|i| format!("(line {i})\n")).collect();
+        ide.set_focus(Focus::Editor);
+        ide.ed_mut().set_text(&body);
+        ide.ed_mut().set_cursor(0); // set_text leaves the cursor at the end
+        ide.render(Rect { x0: 0.0, y0: 0.0, x1: 1000.0, y1: 680.0 });
+        assert_eq!(ide.ed().scroll_top(), 0);
+        // One impulse of 7 lines over the editor half.
+        let wheel = IGuiEvent::Mouse {
+            child_id: 1, x: 400, y: 200, op: crate::igui_events::mouse_op::WHEEL, button: 0,
+            mods: 0, wheel_delta: 7, wheel_lines: 7, time_ms: 0,
+        };
+        ide.handle_event(&wheel);
+        assert_eq!(ide.ed().scroll_top(), 0, "nothing applied instantly");
+        let mut t = 0u128;
+        while t <= 500 {
+            t += 16;
+            let _ = ide.animate(t);
+        }
+        assert!(ide.ed().scroll_top() >= 5, "momentum delivers the impulse (got {})", ide.ed().scroll_top());
+    }
+
+    /// The busy ● renders in the status bar's right zone while evaluating.
+    #[test]
+    fn busy_indicator_renders_dot_when_evaluating() {
+        let mut ide = Ide::new(fixed_dark());
+        ide.set_metrics(8.0, 16.0, 12.0);
+        let idle = ide.render(Rect { x0: 0.0, y0: 0.0, x1: 1000.0, y1: 680.0 });
+        assert!(!idle.iter().any(|c| matches!(
+            c,
+            SurfaceCmd::DrawTextRun { run } if run.text == "●"
+        )));
+        ide.set_busy(true);
+        let busy = ide.render(Rect { x0: 0.0, y0: 0.0, x1: 1000.0, y1: 680.0 });
+        let dot = busy.iter().find_map(|c| match c {
+            SurfaceCmd::DrawTextRun { run } if run.text == "●" => Some(run.color),
+            _ => None,
+        });
+        let accent = ide.sys.accent;
+        assert_eq!(dot, Some(accent), "busy dot in accent colour");
+    }
+
+    /// The caret blinks at the half-second cadence end-to-end: rendered at
+    /// t=0, gone at t=500, back at t=1000 (window active, editor focused).
+    #[test]
+    fn caret_blinks_in_render() {
+        let mut ide = Ide::new(fixed_dark());
+        ide.set_metrics(8.0, 16.0, 12.0);
+        ide.set_focus(Focus::Editor);
+        let has_caret = |ide: &mut Ide| {
+            let cmds = ide.render(Rect { x0: 0.0, y0: 0.0, x1: 1000.0, y1: 680.0 });
+            cmds.iter().any(|c| matches!(c, SurfaceCmd::Caret { .. }))
+        };
+        assert!(has_caret(&mut ide), "t=0 visible");
+        ide.animate(500);
+        assert!(!has_caret(&mut ide), "t=500 hidden");
+        ide.animate(1000);
+        assert!(has_caret(&mut ide), "t=1000 visible again");
+        // Inactive window: caret never shows.
+        ide.set_active(false);
+        assert!(!has_caret(&mut ide));
+    }
+
+    /// Cursor hit test through the IDE's own layout.
+    #[test]
+    fn cursor_shape_lookup_via_ide() {
+        let mut ide = Ide::new(fixed_dark());
+        ide.set_metrics(8.0, 16.0, 12.0);
+        ide.render(Rect { x0: 0.0, y0: 0.0, x1: 1000.0, y1: 680.0 });
+        let h = ide.layout_hints();
+        assert_eq!(ide.cursor_shape_at(5.0), CursorShape::Arrow);
+        assert_eq!(ide.cursor_shape_at(100.0), CursorShape::IBeam);
+        assert_eq!(ide.cursor_shape_at(h.divider_y), CursorShape::ResizeUpDown);
+        assert_eq!(ide.cursor_shape_at(600.0), CursorShape::IBeam);
     }
 
     /// A SaveAs event writes the buffer, clears dirty, adopts the name.

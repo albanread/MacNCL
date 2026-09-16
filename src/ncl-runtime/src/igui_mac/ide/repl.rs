@@ -121,6 +121,12 @@ impl Repl {
         self.input.set_show_caret(v);
     }
 
+    /// Scroll the transcript (positive = toward the bottom).
+    pub fn scroll_lines(&mut self, n: i64) {
+        let new = self.scroll_from_bottom as i64 - n;
+        self.scroll_from_bottom = new.max(0) as usize;
+    }
+
     /// Append text (split on newlines) to the transcript.
     pub fn print(&mut self, kind: LineKind, text: &str) {
         for line in text.split('\n') {

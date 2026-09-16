@@ -183,6 +183,7 @@ fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
         let (cw, ch, asc) = metrics(&theme.family, theme.size);
         let mut ide = Ide::new((*sys).clone());
         ide.set_metrics(cw, ch, asc);
+        ide.set_reduce_motion(window::reduce_motion_pref());
         // Test hook: pin the key-window state so dimming can be verified
         // headlessly (unset → follow Focus events from the real window).
         let forced_active = std::env::var("NCL_GUI_FAKE_KEY_WINDOW").ok().and_then(|v| {
@@ -461,10 +462,14 @@ fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
             if to_ide {
                 match ide.handle_event(&ev) {
                     IdeAction::Eval(src) => {
+                        // Show the busy ● while the worker evaluates.
+                        ide.set_busy(true);
+                        window::present_main(ide.render(area));
                         // Capture the program's printed output so
                         // `(format t …)` / print show up in the transcript.
                         ncl_runtime::output::begin_capture();
                         let result = session.eval(&src);
+                        ide.set_busy(false);
                         if let Some(printed) = ncl_runtime::output::end_capture() {
                             let printed = printed.trim_end_matches('\n');
                             if !printed.is_empty() {
@@ -512,6 +517,16 @@ fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
                 // re-presented for app events.
                 session.dispatch_gui_event(ev);
             }
+
+            // Feel-pass pump: advance blink + scroll release, repaint if
+            // anything moved, re-arm the animation tick and refresh the
+            // cursor geometry. Idle ⇒ no deadline ⇒ zero wakeups.
+            let now = window::now_ms();
+            if ide.animate(now) {
+                window::present_main(ide.render(area));
+            }
+            window::request_ide_tick(ide.next_wake_ms(now).map_or(0, |t| t as u64));
+            window::set_cursor_hints(ide.layout_hints());
         }
     };
 

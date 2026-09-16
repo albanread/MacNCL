@@ -475,6 +475,13 @@ impl Editor {
     /// inside any top-level form. Bracket scan ignores strings/comments.
     pub fn current_form(&self) -> Option<String> {
         let cps = self.buffer.to_slice();
+        self.top_level_form_range(&cps)
+            .map(|(s, e)| codepoints_to_utf8(&cps[s..e]))
+    }
+
+    /// Offset range `(start, end)` of the top-level form containing the
+    /// cursor — shared by eval-at-point and triple-click selection.
+    fn top_level_form_range(&self, cps: &[u32]) -> Option<(usize, usize)> {
         let cur = self.cursor.min(cps.len());
         let mut depth: i32 = 0;
         let mut start: Option<usize> = None;
@@ -523,7 +530,7 @@ impl Editor {
                 _ => {}
             }
         }
-        best.map(|(s, e)| codepoints_to_utf8(&cps[s..e]))
+        best
     }
 
     pub fn selected_text(&self) -> String {
@@ -1458,6 +1465,61 @@ impl Editor {
         let col = ((text_x / self.theme.cell_w) + 0.5) as usize;
         self.set_cursor_rc(row, col, extend);
         self.pref_col = col;
+    }
+
+    /// A Lisp symbol constituent: letters, digits, and the punctuation
+    /// that may appear inside symbols (brackets, quotes, commas, and
+    /// whitespace delimit instead).
+    fn is_word_char(c: char) -> bool {
+        c.is_alphanumeric() || "*+-./<>=!?&%$_#^~:@".contains(c)
+    }
+
+    /// Double-click: select the word (symbol/number) under the point.
+    pub fn select_word_at(&mut self, x: f32, y: f32, area: Rect) {
+        let gutter = self.gutter_w();
+        let row = self.scroll_top + (((y - area.y0).max(0.0)) / self.theme.cell_h) as usize;
+        let col = (((x - area.x0 - gutter).max(0.0)) / self.theme.cell_w) as usize;
+        let line: Vec<char> = codepoints_to_utf8(&self.buffer.get_line(row.min(self.buffer.line_count().saturating_sub(1))))
+            .chars()
+            .collect();
+        let mut c = col.min(line.len().saturating_sub(1));
+        if !Self::is_word_char(line[c]) {
+            return; // click on whitespace/bracket → plain caret
+        }
+        let mut lo = c;
+        while lo > 0 && Self::is_word_char(line[lo - 1]) {
+            lo -= 1;
+        }
+        while c + 1 < line.len() && Self::is_word_char(line[c + 1]) {
+            c += 1;
+        }
+        let hi = c + 1; // exclusive
+        // Offsets: rows before + [lo, hi) in this row.
+        let mut off = 0;
+        for r in 0..row {
+            off += self.buffer.get_line(r).len() + 1; // + newline
+        }
+        let start = off + lo;
+        let end = off + hi;
+        self.cursor = start;
+        self.anchor = end;
+        self.ensure_cursor_visible();
+    }
+
+    /// Triple-click: select the enclosing **top-level** form (a Lisp
+    /// flourish — the form you'd ⌘↩-evaluate).
+    pub fn select_form_at(&mut self, x: f32, y: f32, area: Rect) {
+        self.on_click(x, y, area, false);
+        let cps = self.buffer.to_slice();
+        if let Some((s, e)) = self.top_level_form_range(&cps) {
+            self.anchor = s;
+            self.cursor = e;
+        }
+    }
+
+    /// Current top visible row (test seam / diagnostics).
+    pub fn scroll_top(&self) -> usize {
+        self.scroll_top
     }
 
     /// Scroll by `lines` (positive = down).
