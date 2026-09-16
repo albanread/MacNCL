@@ -374,6 +374,14 @@ impl WindowManager {
             drop.registerForDraggedTypes(&types);
             view.addSubview(&drop);
         }
+        // Accessibility: VoiceOver reads these instead of "image"/"view".
+        // SAFETY: plain string setters on live objects.
+        if is_main {
+            let label = NSString::from_str("MacNCL — Lisp editor and REPL");
+            let _: () = unsafe { objc2::msg_send![&window, setAccessibilityLabel: &*label] };
+            let canvas = NSString::from_str("Lisp editor and REPL canvas");
+            let _: () = unsafe { objc2::msg_send![&view, setAccessibilityLabel: &*canvas] };
+        }
         window.makeKeyAndOrderFront(None);
         let num = window.windowNumber();
         self.wins.insert(id, WinEntry { window, view, w, h, num });

@@ -461,7 +461,7 @@ fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
 
             if to_ide {
                 match ide.handle_event(&ev) {
-                    IdeAction::Eval(src) => {
+                    IdeAction::Eval { source: src, range } => {
                         // Show the busy ● while the worker evaluates.
                         ide.set_busy(true);
                         window::present_main(ide.render(area));
@@ -477,8 +477,19 @@ fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
                             }
                         }
                         match result {
-                            Ok(s) => ide.output(&s),
-                            Err(e) => ide.error(&format!("{e:?}")),
+                            Ok(s) => {
+                                ide.output(&s);
+                                // A clean eval clears the inline squiggle.
+                                ide.clear_diagnostics();
+                            }
+                            Err(e) => {
+                                ide.error(&format!("{e:?}"));
+                                // Editor-originated evals squiggle the
+                                // offending form in place.
+                                if let Some((lo, hi)) = range {
+                                    ide.set_diagnostic((lo, hi), &format!("{e:?}"));
+                                }
+                            }
                         }
                     }
                     // ⌘+/⌘−: re-measure the code font's cell metrics so the

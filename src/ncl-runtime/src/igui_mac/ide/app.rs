@@ -32,8 +32,10 @@ enum Focus {
 pub enum IdeAction {
     None,
     /// Evaluate this source through the compiler, then call
-    /// `output`/`error` with the result.
-    Eval(String),
+    /// `output`/`error` with the result. `range` is the editor offsets
+    /// the source came from, so an eval error can be squiggled in place
+    /// (`None` for REPL submissions and whole-buffer runs).
+    Eval { source: String, range: Option<(usize, usize)> },
     /// The code font size changed — re-measure cell metrics via Core Text
     /// and call `set_metrics` before the next render.
     Remeasure,
@@ -150,6 +152,8 @@ pub struct Ide {
     last_click: (f32, f32),
     /// True while the worker is evaluating (status-bar ●).
     busy: bool,
+    /// Whether the `»` overflow tab menu is open.
+    overflow_open: bool,
     /// The driver's clock at the last animate/input — blink re-arm needs
     /// *some* timestamp; tests drive it directly.
     now_ms: u128,
@@ -166,6 +170,8 @@ const SPLIT_MAX: f32 = 0.90;
 pub const TRAFFIC_INSET: f32 = 78.0;
 /// Width of the `+` (new buffer) button that follows the last tab.
 const PLUS_W: f32 = 28.0;
+/// Tabs shown as chips before the `»` overflow menu takes over.
+pub const MAX_TAB_CHIPS: usize = 8;
 
 impl Ide {
     pub fn new(sys: SystemTheme) -> Self {
@@ -203,6 +209,7 @@ impl Ide {
             click_count: 0,
             last_click: (f32::MIN, f32::MIN),
             busy: false,
+            overflow_open: false,
             now_ms: 0,
         }
     }
@@ -266,6 +273,27 @@ impl Ide {
     /// Honor the system Reduce Motion preference (no scroll tail).
     pub fn set_reduce_motion(&mut self, on: bool) {
         self.scroll_ease.set_reduce_motion(on);
+    }
+
+    /// Mark an eval failure in the active editor (squiggle + gutter dot).
+    pub fn set_diagnostic(&mut self, range: (usize, usize), message: &str) {
+        self.ed_mut().set_diagnostics(vec![crate::igui_mac::ide::editor::Diagnostic {
+            start: range.0,
+            end: range.1,
+            message: message.to_string(),
+        }]);
+    }
+
+    /// The diagnostics colour (test seam).
+    pub fn ed_diag_color(&self) -> crate::igui_paint::Rgba {
+        self.theme.diag
+    }
+
+    /// Clear inline diagnostics (after a successful eval).
+    pub fn clear_diagnostics(&mut self) {
+        for b in &mut self.buffers {
+            b.set_diagnostics(Vec::new());
+        }
     }
 
     /// Caret visibility = window active ∧ pane focused ∧ blink on.
@@ -448,13 +476,43 @@ impl Ide {
         Rect { x0: 0.0, y0: div + 1.0, x1: self.width, y1: self.height }
     }
     fn tab_width(&self) -> f32 {
-        ((self.width - TRAFFIC_INSET) / self.buffers.len() as f32).min(200.0).max(60.0)
+        let visible = self.buffers.len().min(MAX_TAB_CHIPS) as f32;
+        // Reserve room for the `+` chip (and `»` when overflowing) so no
+        // control is pushed off the right edge.
+        let mut avail = self.width - TRAFFIC_INSET - PLUS_W - 8.0;
+        if self.buffers.len() > MAX_TAB_CHIPS {
+            avail -= 32.0;
+        }
+        (avail / visible).min(200.0).max(60.0)
+    }
+
+    /// Rect of the `»` overflow chip (only when there are hidden buffers).
+    fn overflow_rect(&self) -> Option<Rect> {
+        if self.buffers.len() <= MAX_TAB_CHIPS {
+            return None;
+        }
+        let x0 = TRAFFIC_INSET + MAX_TAB_CHIPS as f32 * self.tab_width();
+        Some(Rect { x0, y0: 0.0, x1: x0 + 28.0, y1: self.tab_h() })
+    }
+
+    /// The overflow dropdown panel under the `»` chip, kept on-window.
+    fn overflow_panel(&self) -> Rect {
+        let rows = self.buffers.len() - MAX_TAB_CHIPS;
+        let mut x0 = self.overflow_rect().map_or(TRAFFIC_INSET, |r| r.x0);
+        let x1 = (x0 + 220.0).min(self.width);
+        if x1 - x0 < 160.0 {
+            x0 = (self.width - 220.0).max(TRAFFIC_INSET);
+        }
+        Rect { x0, y0: self.tab_h(), x1: x1.max(x0 + 160.0), y1: self.tab_h() + rows as f32 * 24.0 + 4.0 }
     }
 
     /// Rect of the `+` (new buffer) button that follows the last tab.
     fn plus_rect(&self) -> Rect {
-        let x0 = TRAFFIC_INSET + self.buffers.len() as f32 * self.tab_width() + 4.0;
-        Rect { x0, y0: 0.0, x1: x0 + PLUS_W, y1: self.tab_h() }
+        let mut x0 = TRAFFIC_INSET + self.buffers.len().min(MAX_TAB_CHIPS) as f32 * self.tab_width();
+        if let Some(o) = self.overflow_rect() {
+            x0 = o.x1;
+        }
+        Rect { x0: x0 + 4.0, y0: 0.0, x1: x0 + 4.0 + PLUS_W, y1: self.tab_h() }
     }
 
     /// What the NSWindow title should show: the active buffer's file name,
@@ -549,7 +607,7 @@ impl Ide {
         let src = self.ed().text();
         if !src.trim().is_empty() {
             self.repl.info("; run buffer");
-            return IdeAction::Eval(src);
+            return IdeAction::Eval { source: src, range: None };
         }
         IdeAction::None
     }
@@ -557,14 +615,21 @@ impl Ide {
     fn eval_form_at_point(&mut self) -> IdeAction {
         // Eval the selection if there is one, else the form at point.
         let sel = self.ed().selected_text();
-        let form = if !sel.trim().is_empty() {
+        let form_from_sel = !sel.trim().is_empty();
+        let form = if form_from_sel {
             Some(sel)
         } else {
             self.ed().current_form()
         };
         if let Some(form) = form {
             self.repl.info(&format!("; {}", form.replace('\n', " ")));
-            return IdeAction::Eval(form);
+            // Remember where the form lives so an error can be squiggled.
+            let range = if form_from_sel {
+                self.ed().selection_range()
+            } else {
+                self.ed().current_form_range()
+            };
+            return IdeAction::Eval { source: form, range };
         }
         IdeAction::None
     }
@@ -696,16 +761,37 @@ impl Ide {
                 }
 
                 // Tab-bar clicks: the `+` button opens a buffer; a tab
-                // switches to it. (Tabs start right of the traffic lights.)
+                // switches to it; `»` toggles the overflow menu. (Tabs
+                // start right of the traffic lights.)
                 if down && my < self.header_h() {
                     let pr = self.plus_rect();
                     if mx >= pr.x0 && mx < pr.x1 {
+                        self.overflow_open = false;
                         self.new_buffer();
                         return IdeAction::None;
                     }
+                    if let Some(or) = self.overflow_rect() {
+                        if mx >= or.x0 && mx < or.x1 {
+                            self.overflow_open = !self.overflow_open;
+                            return IdeAction::None;
+                        }
+                    }
                     if mx >= TRAFFIC_INSET {
                         let i = ((mx - TRAFFIC_INSET) / self.tab_width()) as usize;
-                        self.switch_to(i);
+                        self.switch_to(i.min(MAX_TAB_CHIPS - 1));
+                    }
+                    return IdeAction::None;
+                }
+
+                // Overflow dropdown: pick a hidden buffer, or dismiss.
+                if self.overflow_open && down {
+                    let r = self.overflow_panel();
+                    self.overflow_open = false;
+                    if mx >= r.x0 && mx <= r.x1 && my >= r.y0 && my <= r.y1 {
+                        let idx = MAX_TAB_CHIPS + ((my - r.y0 - 2.0) / 24.0) as usize;
+                        if idx < self.buffers.len() {
+                            self.switch_to(idx);
+                        }
                     }
                     return IdeAction::None;
                 }
@@ -799,7 +885,7 @@ impl Ide {
                     time_ms: 0,
                 };
                 match self.repl.handle_event(&ev) {
-                    Some(src) => IdeAction::Eval(src),
+                    Some(src) => IdeAction::Eval { source: src, range: None },
                     None => IdeAction::None,
                 }
             }
@@ -871,7 +957,8 @@ impl Ide {
             color: s.chrome_bg,
         });
         let tw = self.tab_width();
-        for (i, b) in self.buffers.iter().enumerate() {
+        let visible = self.buffers.len().min(MAX_TAB_CHIPS);
+        for (i, b) in self.buffers.iter().take(visible).enumerate() {
             let x0 = TRAFFIC_INSET + i as f32 * tw;
             let active = i == self.active;
             cmds.push(SurfaceCmd::FillRect {
@@ -902,6 +989,21 @@ impl Ide {
                 13.0,
             ),
         );
+        // `»` overflow chip when tabs don't fit.
+        if let Some(or) = self.overflow_rect() {
+            cmds.push(SurfaceCmd::FillRect {
+                rect: Rect { x0: or.x0, y0: ta.y0 + 2.0, x1: or.x1, y1: ta.y1 },
+                corner_radius: 4.0,
+                color: if self.overflow_open { s.raised_bg } else { s.sunken_bg },
+            });
+            cmds.push(self.run(
+                "»".into(),
+                or.x0 + 8.0,
+                ta.y0 + 4.0,
+                self.tier(s.text_secondary, s.text_tertiary),
+                13.0,
+            ));
+        }
 
         // ── editor pane ──
         for c in self.ed_mut().render(ea) {
@@ -950,8 +1052,14 @@ impl Ide {
         let _ = div_y;
         let s = &self.sys;
         let dim = s.separator;
-        let glow = if self.window_active { s.accent } else { s.separator };
-        let (etop, ebot) = if self.dragging_split {
+        // Increase Contrast: thicker divider, plain separator colour — no
+        // accent tint where a solid stroke reads better.
+        let (thick, glow) = if s.high_contrast {
+            (4.0, s.separator)
+        } else {
+            (2.0, if self.window_active { s.accent } else { s.separator })
+        };
+        let (etop, ebot) = if self.dragging_split || s.high_contrast {
             (glow, glow)
         } else {
             match self.focus {
@@ -960,12 +1068,12 @@ impl Ide {
             }
         };
         cmds.push(SurfaceCmd::FillRect {
-            rect: Rect { x0: area.x0, y0: div_real - 2.0, x1: area.x1, y1: div_real },
+            rect: Rect { x0: area.x0, y0: div_real - thick, x1: area.x1, y1: div_real },
             corner_radius: 0.0,
             color: etop,
         });
         cmds.push(SurfaceCmd::FillRect {
-            rect: Rect { x0: area.x0, y0: div_real, x1: area.x1, y1: div_real + 2.0 },
+            rect: Rect { x0: area.x0, y0: div_real, x1: area.x1, y1: div_real + thick },
             corner_radius: 0.0,
             color: ebot,
         });
@@ -978,6 +1086,30 @@ impl Ide {
             corner_radius: 2.0,
             color: glow,
         });
+
+        // ── `»` overflow dropdown (over everything) ──
+        if self.overflow_open {
+            if let (Some(_), true) = (self.overflow_rect(), self.buffers.len() > MAX_TAB_CHIPS) {
+                let r = self.overflow_panel();
+                cmds.push(SurfaceCmd::FillRect { rect: r, corner_radius: 6.0, color: s.raised_bg });
+                cmds.push(SurfaceCmd::StrokeRect {
+                    rect: r,
+                    corner_radius: 6.0,
+                    half_thickness: 1.0,
+                    color: s.separator,
+                });
+                for (j, b) in self.buffers.iter().enumerate().skip(MAX_TAB_CHIPS) {
+                    let y = r.y0 + 2.0 + (j - MAX_TAB_CHIPS) as f32 * 24.0;
+                    cmds.push(self.run(
+                        Self::tab_label(b),
+                        r.x0 + 10.0,
+                        y + 4.0,
+                        if j == self.active { s.text } else { s.text_secondary },
+                        13.0,
+                    ));
+                }
+            }
+        }
         cmds
     }
 }
@@ -1034,7 +1166,10 @@ mod tests {
         let via_key = ide.on_key(0x52, modifier::WIN); // Cmd-R
         let via_menu = ide.handle_event(&menu(menu_cmd::RUN_BUFFER));
         match (via_key, via_menu) {
-            (IdeAction::Eval(k), IdeAction::Eval(m)) => assert_eq!(k, m),
+            (
+                IdeAction::Eval { source: k, .. },
+                IdeAction::Eval { source: m, .. },
+            ) => assert_eq!(k, m),
             _ => panic!("both paths should request an eval"),
         }
     }
@@ -1101,7 +1236,7 @@ mod tests {
         let mut ide = Ide::new(fixed_dark());
         ide.focus = Focus::Editor;
         match ide.on_key(0x52, modifier::WIN) {
-            IdeAction::Eval(src) => assert!(src.contains("defun square")),
+            IdeAction::Eval { source: src, .. } => assert!(src.contains("defun square")),
             _ => panic!("Cmd-R should request an eval"),
         }
     }
@@ -1119,7 +1254,7 @@ mod tests {
             });
         }
         match ide.handle_event(&key(vk::RETURN, 0)) {
-            IdeAction::Eval(src) => assert_eq!(src, "(+ 2 3)"),
+            IdeAction::Eval { source: src, .. } => assert_eq!(src, "(+ 2 3)"),
             _ => panic!("Return in REPL should eval"),
         }
     }
@@ -1129,7 +1264,9 @@ mod tests {
         let mut ide = Ide::new(fixed_dark());
         ide.focus = Focus::Editor;
         match ide.on_key(vk::RETURN, modifier::WIN) {
-            IdeAction::Eval(src) => assert!(src.starts_with('(') && src.contains("defun")),
+            IdeAction::Eval { source: src, .. } => {
+                assert!(src.starts_with('(') && src.contains("defun"))
+            }
             _ => panic!("Cmd-Return should eval the form at point"),
         }
     }
@@ -1589,6 +1726,170 @@ mod tests {
         assert_eq!(ide.cursor_shape_at(100.0), CursorShape::IBeam);
         assert_eq!(ide.cursor_shape_at(h.divider_y), CursorShape::ResizeUpDown);
         assert_eq!(ide.cursor_shape_at(600.0), CursorShape::IBeam);
+    }
+
+    // ── Sprint 7: diagnostics, contrast, overflow tabs ────────────────
+
+    /// A diagnostic on line 2, cols 5–11 squiggles exactly those columns
+    /// (plus a gutter dot) and nothing else.
+    #[test]
+    fn error_range_underlines_offending_form() {
+        use crate::igui_mac::ide::editor::Diagnostic;
+        let mut ide = Ide::new(fixed_dark());
+        ide.set_metrics(8.0, 16.0, 12.0);
+        ide.set_focus(Focus::Editor);
+        ide.ed_mut().set_text("(defun a () 1)\n(defun b () 2)\n");
+        // Offsets: line 2 starts at 15; cols 5..11 → 20..26.
+        ide.ed_mut().set_diagnostics(vec![Diagnostic {
+            start: 20,
+            end: 26,
+            message: "undefined".into(),
+        }]);
+        let cmds = ide.render(Rect { x0: 0.0, y0: 0.0, x1: 1000.0, y1: 680.0 });
+        let diag = ide.ed_diag_color();
+        let gutter = 36.0; // (max(3)+1.5) cells × 8
+        let header = ide.header_h();
+        let mut squiggle_x: Vec<(f32, f32)> = Vec::new();
+        let mut dots = 0;
+        for c in &cmds {
+            match c {
+                SurfaceCmd::DrawLine { p0, p1, color, .. } if *color == diag => {
+                    squiggle_x.push((p0.x, p1.x));
+                }
+                SurfaceCmd::FillCircle { color, .. } if *color == diag => dots += 1,
+                _ => {}
+            }
+        }
+        assert!(!squiggle_x.is_empty(), "squiggle renders");
+        assert_eq!(dots, 1, "one gutter dot");
+        let x_lo = gutter + 5.0 * 8.0;
+        let x_hi = gutter + 11.0 * 8.0;
+        for (a, b) in &squiggle_x {
+            assert!(*a >= x_lo - 0.5 && *b <= x_hi + 0.5, "segment {a}..{b} outside cols 5–11");
+        }
+        // And it sits under line 2 (y ≈ header + 2 rows + cell bottom).
+        let y = squiggle_y(&cmds, diag);
+        let y_lo = header + 1.0 * 16.0 + 8.0;
+        let y_hi = header + 2.0 * 16.0;
+        assert!(y >= y_lo && y <= y_hi, "squiggle y {y} not under line 2 ({y_lo}..{y_hi})");
+    }
+
+    fn squiggle_y(cmds: &[SurfaceCmd], diag: crate::igui_paint::Rgba) -> f32 {
+        cmds.iter().find_map(|c| match c {
+            SurfaceCmd::DrawLine { p0, color, .. } if *color == diag => Some(p0.y),
+            _ => None,
+        }).unwrap_or(f32::NAN)
+    }
+
+    /// Clearing diagnostics removes every squiggle/dot.
+    #[test]
+    fn diagnostics_clear_on_successful_eval() {
+        use crate::igui_mac::ide::editor::Diagnostic;
+        let mut ide = Ide::new(fixed_dark());
+        ide.set_metrics(8.0, 16.0, 12.0);
+        ide.ed_mut().set_diagnostics(vec![Diagnostic {
+            start: 0, end: 5, message: "x".into(),
+        }]);
+        ide.clear_diagnostics();
+        let cmds = ide.render(Rect { x0: 0.0, y0: 0.0, x1: 1000.0, y1: 680.0 });
+        let diag = ide.ed_diag_color();
+        assert!(!cmds.iter().any(|c| matches!(
+            c,
+            SurfaceCmd::DrawLine { color, .. } if *color == diag
+        )), "no squiggle after clear");
+    }
+
+    /// Increase Contrast: the divider doubles in thickness and loses its
+    /// accent tint (plain separator both sides).
+    #[test]
+    fn increase_contrast_thickens_separators() {
+        let heights = |sys: SystemTheme| -> Vec<(f32, crate::igui_paint::Rgba)> {
+            let mut ide = Ide::new(sys);
+            ide.set_metrics(8.0, 16.0, 12.0);
+            let accent = ide.sys.accent;
+            let sep = ide.sys.separator;
+            let cmds = ide.render(Rect { x0: 0.0, y0: 0.0, x1: 1000.0, y1: 680.0 });
+            cmds.iter()
+                .filter_map(|c| match c {
+                    SurfaceCmd::FillRect { rect, color, .. }
+                        if (rect.y1 - rect.y0) <= 5.0
+                            && rect.x1 - rect.x0 > 900.0
+                            && rect.y0 > 100.0 =>
+                    {
+                        Some((rect.y1 - rect.y0, *color))
+                    }
+                    _ => None,
+                })
+                .take(2)
+                .collect::<Vec<_>>()
+                .into_iter()
+                .map(|(h, c)| (h, if c == accent { accent } else { sep }))
+                .collect()
+        };
+        let normal = heights(fixed_dark());
+        let hc = heights(crate::igui_mac::theme::fixed_high_contrast());
+        assert!(normal.iter().all(|(h, _)| (*h - 2.0).abs() < 0.01), "baseline 2px: {normal:?}");
+        assert!(hc.iter().all(|(h, _)| (*h - 4.0).abs() < 0.01), "contrast 4px: {hc:?}");
+        assert!(hc.iter().all(|(_, c)| *c != fixed_dark().accent), "no accent tint in contrast mode");
+    }
+
+    /// Past 8 buffers the strip shows a `»` chip; its menu lists the
+    /// hidden buffers and picking one activates it.
+    #[test]
+    fn overflow_menu_lists_hidden_tabs() {
+        use crate::igui_events::mouse_op;
+        let mut ide = Ide::new(fixed_dark());
+        ide.set_metrics(8.0, 16.0, 12.0);
+        while ide.buffers.len() < 12 {
+            ide.on_key(0x54, modifier::WIN); // Cmd-T
+        }
+        ide.on_key(0x31, modifier::WIN); // Cmd-1 → first
+        let cmds = ide.render(Rect { x0: 0.0, y0: 0.0, x1: 1000.0, y1: 680.0 });
+        assert!(cmds.iter().any(|c| matches!(
+            c, SurfaceCmd::DrawTextRun { run } if run.text == "»"
+        )), "» chip renders past 8 tabs");
+        // Only 8 tab chips (+ » and +).
+        let tab_runs = cmds.iter().filter(|c| matches!(
+            c, SurfaceCmd::DrawTextRun { run } if run.text.starts_with("untitled")
+        )).count();
+        assert_eq!(tab_runs, 8, "chips capped at 8, got {tab_runs}");
+
+        // Open the menu: 4 hidden buffers listed.
+        let or = ide.overflow_rect().expect("overflow chip");
+        ide.handle_event(&mouse(mouse_op::LEFT_DOWN, (or.x0 + or.x1) / 2.0, 5.0));
+        ide.handle_event(&mouse(mouse_op::LEFT_UP, (or.x0 + or.x1) / 2.0, 5.0));
+        assert!(ide.overflow_open);
+        let cmds = ide.render(Rect { x0: 0.0, y0: 0.0, x1: 1000.0, y1: 680.0 });
+        let listed = cmds.iter().filter(|c| matches!(
+            c, SurfaceCmd::DrawTextRun { run } if run.text.starts_with("untitled")
+        )).count();
+        assert_eq!(listed, 8 + 4, "dropdown lists the 4 hidden buffers");
+
+        // Pick the last hidden row → buffer 12 active, menu closed.
+        let panel = ide.overflow_panel();
+        let y = panel.y1 - 8.0;
+        ide.handle_event(&mouse(mouse_op::LEFT_DOWN, panel.x0 + 10.0, y));
+        assert!(!ide.overflow_open, "picking closes the menu");
+        assert_eq!(ide.active, 11, "last hidden buffer activated");
+    }
+
+    /// Eval-form-at-point carries the form's offsets so errors squiggle.
+    #[test]
+    fn eval_action_carries_form_range() {
+        let mut ide = Ide::new(fixed_dark());
+        ide.set_metrics(8.0, 16.0, 12.0);
+        ide.set_focus(Focus::Editor);
+        ide.ed_mut().set_text("(defun a () 1)\n");
+        // Cursor inside the form.
+        ide.ed_mut().set_cursor(3);
+        match ide.on_key(vk::RETURN, modifier::WIN) {
+            IdeAction::Eval { source, range } => {
+                assert!(source.starts_with("(defun"));
+                let (lo, hi) = range.expect("form eval carries its range");
+                assert_eq!((lo, hi), (0, 14));
+            }
+            _ => panic!("Cmd-Return should eval with a range"),
+        }
     }
 
     /// A SaveAs event writes the buffer, clears dirty, adopts the name.

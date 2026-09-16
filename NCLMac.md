@@ -87,8 +87,15 @@ New) opens a buffer, in addition to ⌘T.
 - **Editing essentials** — undo/redo with typing coalescing, selection, an internal
   clipboard (cut/copy/paste/select-all), a line-number gutter, and vertical motion that
   remembers the preferred column.
-- **Files** — open a file by passing it on the command line; Cmd-S saves it back. A
-  status bar shows `path • line:col • modified`.
+- **Files** — open via the command line, **⌘O** (native open panel), **Open Recent ▸**,
+  or by dropping a `.lisp` file on the window; **⌘S** saves, **⇧⌘S** saves as. A
+  status bar shows `path • line:col • modified` (and an accent ● while an eval runs).
+- **Clicks** — double-click selects the word; **triple-click selects the enclosing
+  top-level form** (the ⌘↩ eval target); shift-click extends. A failed ⌘↩ eval
+  squiggles the form in red — a clean re-eval clears it.
+- **Font** — SF Mono (Menlo fallback) with SF Pro chrome; **⌘=/⌘−** zoom code
+  12–20pt.
+- **Tabs** — up to eight chips; past that a **»** menu lists the rest.
 
 ### REPL pane
 
@@ -114,8 +121,10 @@ Definitions you write in the editor become live in the REPL:
 |---|---|---|---|---|
 | **Cmd-R** | run editor buffer | | **Ctrl-→ / ←** | forward / backward sexp |
 | **Cmd-Return** | eval form at cursor | | **Ctrl-Shift-→ / ←** | slurp / barf forward |
-| **Cmd-S** | save file | | **Ctrl-W** | wrap in `( )` |
-| **Cmd-F / Cmd-G** | find / find next | | **Ctrl-S** | splice (remove brackets) |
+| **Cmd-N / Cmd-T** | new buffer / new tab | | **Ctrl-W** | wrap in `( )` |
+| **Cmd-O** | open… (panel) | | **Ctrl-S** | splice (remove brackets) |
+| **Cmd-S / Shift-Cmd-S** | save / save as… | | **Ctrl-Up** | select enclosing form |
+| **Cmd-F / Cmd-G** | find / find next | | **Cmd-= / Cmd--** | font bigger / smaller |
 | **Cmd-/** | toggle comment | | **Ctrl-R** | raise sexp |
 | **Cmd-E / Cmd-L** | focus editor / REPL | | **Tab** | reindent line / selection |
 | **Cmd-T / Cmd-W** | new / close tab | | **Cmd-D** | duplicate line |

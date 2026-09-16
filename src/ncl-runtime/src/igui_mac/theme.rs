@@ -84,6 +84,10 @@ pub struct SystemTheme {
     pub syntax: Syntax,
     /// True when resolved for a dark appearance (used for tweaks).
     pub dark: bool,
+    /// The system Increase Contrast preference: thicker separators,
+    /// stronger selection, no accent tints where a plain stroke reads
+    /// better.
+    pub high_contrast: bool,
 }
 
 impl SystemTheme {
@@ -91,14 +95,19 @@ impl SystemTheme {
     /// (family/size/cells) keep the defaults; the driver measures and
     /// calls `set_metrics` as before.
     pub fn to_editor_theme(&self) -> EditorTheme {
+        let selection = if self.high_contrast {
+            with_alpha(self.accent, 0.5)
+        } else {
+            self.selection
+        };
         EditorTheme {
             // `__mono` → SF Mono via the AppKit resolver, Menlo headless.
             family: "__mono".into(),
             size: 15.0,
+            selection,
             bg: self.editor_bg,
             fg: self.syntax.fg,
             caret: self.accent,
-            selection: self.selection,
             gutter_fg: self.gutter,
             c_special: self.syntax.special,
             c_keyword: self.syntax.keyword,
@@ -152,6 +161,7 @@ pub fn fixed_dark() -> SystemTheme {
         },
         accent,
         dark: true,
+        high_contrast: false,
     }
 }
 
@@ -186,7 +196,17 @@ pub fn fixed_light() -> SystemTheme {
         },
         accent,
         dark: false,
+        high_contrast: false,
     }
+}
+
+/// The dark snapshot with Increase Contrast applied (test helper): a
+/// stronger selection alpha is the visible delta.
+pub fn fixed_high_contrast() -> SystemTheme {
+    let mut t = fixed_dark();
+    t.high_contrast = true;
+    t.selection = with_alpha(t.accent, 0.5);
+    t
 }
 
 // ── Swap slot ─────────────────────────────────────────────────────────────
@@ -237,7 +257,10 @@ pub fn refresh(app: &objc2_app_kit::NSApplication) -> bool {
     let chrome = token(&NSColor::windowBackgroundColor());
     let text = token(&NSColor::labelColor());
     let base = if dark { fixed_dark() } else { fixed_light() };
+    let high_contrast = objc2_app_kit::NSWorkspace::sharedWorkspace()
+        .accessibilityDisplayShouldIncreaseContrast();
     let theme = SystemTheme {
+        high_contrast,
         chrome_bg: chrome,
         // Chips derive from the resolved chrome (no exact system color):
         // lift toward the label color, which reads as "raised" in both

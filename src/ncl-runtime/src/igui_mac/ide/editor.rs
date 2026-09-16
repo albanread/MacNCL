@@ -104,6 +104,8 @@ pub struct Theme {
     /// Whether the caret is drawn. Hidden when the window is inactive
     /// (macOS hides text carets in background windows).
     pub show_caret: bool,
+    /// Inline-diagnostic squiggle / gutter dot colour.
+    pub diag: Rgba,
 }
 
 #[inline]
@@ -141,8 +143,18 @@ impl Default for Theme {
             search_match: Rgba { r: 0.5, g: 0.5, b: 0.3, a: 0.30 },
             search_bar_bg: rgb(30, 32, 40),
             show_caret: true,
+            diag: rgb(231, 111, 81),
         }
     }
+}
+
+/// An inline diagnostic: a range (code-point offsets) and its message.
+/// Rendered as a squiggle under the range plus a gutter dot (Sprint 7).
+#[derive(Debug, Clone)]
+pub struct Diagnostic {
+    pub start: usize,
+    pub end: usize,
+    pub message: String,
 }
 
 /// Special operators that get the `Special` color.
@@ -297,6 +309,8 @@ pub struct Editor {
     pub show_gutter: bool,
     /// Rows that fit in the viewport, updated by `render`.
     visible_rows: usize,
+    /// Inline diagnostics (eval errors), if any.
+    diagnostics: Vec<Diagnostic>,
 }
 
 impl Default for Editor {
@@ -323,6 +337,7 @@ impl Editor {
             file_path: None,
             show_gutter: true,
             visible_rows: 1,
+            diagnostics: Vec::new(),
         }
     }
 
@@ -432,7 +447,8 @@ impl Editor {
 
     // ─── selection / cursor helpers ──────────────────────────────────
 
-    fn selection_range(&self) -> Option<(usize, usize)> {
+    /// Selection range (lo, hi), public for eval-error squiggling.
+    pub fn selection_range(&self) -> Option<(usize, usize)> {
         if self.cursor == self.anchor {
             None
         } else if self.anchor < self.cursor {
@@ -1522,6 +1538,27 @@ impl Editor {
         self.scroll_top
     }
 
+    /// Replace the inline diagnostics (eval errors). Empty clears.
+    pub fn set_diagnostics(&mut self, d: Vec<Diagnostic>) {
+        self.diagnostics = d;
+    }
+
+    /// Test seam: current cursor/anchor offsets.
+    pub fn cursor_debug(&self) -> (usize, usize) {
+        (self.cursor, self.anchor)
+    }
+
+    pub fn has_diagnostics(&self) -> bool {
+        !self.diagnostics.is_empty()
+    }
+
+    /// Offset range of the top-level form at the cursor — the range an
+    /// eval error should squiggle. `None` when not inside a form.
+    pub fn current_form_range(&self) -> Option<(usize, usize)> {
+        let cps = self.buffer.to_slice();
+        self.top_level_form_range(&cps)
+    }
+
     /// Scroll by `lines` (positive = down).
     pub fn scroll(&mut self, lines: i64) {
         let max_top = self.buffer.line_count().saturating_sub(1);
@@ -1711,6 +1748,58 @@ impl Editor {
                 bar_y + 2.0,
                 t.caret,
             ));
+        }
+
+        // Inline diagnostics: a red squiggle under each range plus a dot
+        // in the gutter (Sprint 7). The squiggle is short zigzag segments.
+        if !self.diagnostics.is_empty() {
+            let len = self.buffer.len();
+            let cell = cell_h;
+            let zig = 1.6_f32;
+            let period = 4.0_f32;
+            let sq_y = |row: usize| area.y0 + (row.saturating_sub(self.scroll_top)) as f32 * cell + cell - 2.5;
+            for d in &self.diagnostics {
+                let (r0, c0) = self.buffer.offset_to_line_col(d.start.min(len));
+                let (r1, c1) = self.buffer.offset_to_line_col(d.end.min(len));
+                // One gutter dot per affected row's first row.
+                if r0 >= self.scroll_top && r0 < self.scroll_top + self.visible_rows {
+                    cmds.push(SurfaceCmd::FillCircle {
+                        center: Point { x: area.x0 + gutter - t.cell_w * 0.75, y: sq_y(r0) },
+                        radius: 2.0,
+                        color: t.diag,
+                    });
+                }
+                for row in r0..=r1.min(self.scroll_top + self.visible_rows.saturating_sub(1)) {
+                    if row < self.scroll_top {
+                        continue;
+                    }
+                    let cs = if row == r0 { c0 } else { 0 };
+                    let ce = if row == r1 { c1.max(cs + 1) } else { 100_000 };
+                    let x_start = text_x0 + cs as f32 * cell_w;
+                    let x_end = (text_x0 + ce as f32 * cell_w).min(area.x1);
+                    let y = sq_y(row);
+                    let mut x = x_start;
+                    let mut up = true;
+                    while x < x_end {
+                        let seg = period.min(x_end - x);
+                        let dy = if up { -zig } else { zig };
+                        cmds.push(SurfaceCmd::DrawLine {
+                            p0: Point { x, y },
+                            p1: Point { x: x + seg * 0.5, y: y + dy },
+                            half_thickness: 0.6,
+                            color: t.diag,
+                        });
+                        cmds.push(SurfaceCmd::DrawLine {
+                            p0: Point { x: x + seg * 0.5, y: y + dy },
+                            p1: Point { x: x + seg, y },
+                            half_thickness: 0.6,
+                            color: t.diag,
+                        });
+                        x += seg;
+                        up = !up;
+                    }
+                }
+            }
         }
 
         // Caret (hidden while the window is inactive).
