@@ -284,6 +284,11 @@ impl Ide {
         }]);
     }
 
+    /// The REPL transcript as text (scripting).
+    pub fn transcript_text(&self) -> String {
+        self.repl.transcript_text()
+    }
+
     /// The diagnostics colour (test seam).
     pub fn ed_diag_color(&self) -> crate::igui_paint::Rgba {
         self.theme.diag
@@ -644,7 +649,7 @@ impl Ide {
         }
     }
 
-    fn clear_repl(&mut self) {
+    pub fn clear_repl(&mut self) {
         self.repl.clear();
     }
 

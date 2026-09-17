@@ -529,6 +529,38 @@ fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
                 session.dispatch_gui_event(ev);
             }
 
+            // Scripting pump: serve Apple-event requests (eval / transcript /
+            // clear repl). Runs on this thread — the session lives here.
+            while let Some(req) =
+                ncl_runtime::igui_mac::scripting::take_request()
+            {
+                use ncl_runtime::igui_mac::scripting::ScriptKind;
+                let answer = match req.kind {
+                    ScriptKind::Eval(src) => {
+                        ide.output(&format!("λ> {src}"));
+                        ncl_runtime::output::begin_capture();
+                        let r = session.eval(&src);
+                        let mut out =
+                            ncl_runtime::output::end_capture().unwrap_or_default();
+                        match r {
+                            Ok(s) => out.push_str(&s),
+                            Err(e) => out.push_str(&format!("{e:?}")),
+                        }
+                        let out = out.trim_end_matches('\n').to_string();
+                        ide.output(&out);
+                        window::present_main(ide.render(area));
+                        out
+                    }
+                    ScriptKind::Transcript => ide.transcript_text(),
+                    ScriptKind::ClearRepl => {
+                        ide.clear_repl();
+                        window::present_main(ide.render(area));
+                        "OK".into()
+                    }
+                };
+                let _ = req.reply.send(answer);
+            }
+
             // Feel-pass pump: advance blink + scroll release, repaint if
             // anything moved, re-arm the animation tick and refresh the
             // cursor geometry. Idle ⇒ no deadline ⇒ zero wakeups.

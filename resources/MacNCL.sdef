@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<dictionary xmlns="http://developer.apple.com/2004/06/applescript"
+            title="MacNCL"
+            description="Scriptable Lisp IDE: evaluate Lisp, read and clear the REPL.">
+    <suite name="MacNCL Suite" code="MNCL" description="MacNCL scripting commands">
+        <command name="eval" code="MNCLeval" description="Evaluate Lisp source in the live REPL session and return the printed result.">
+            <direct-parameter type="text" description="Lisp source to evaluate"/>
+            <result type="text" description="The printed output and result (or error)."/>
+        </command>
+        <command name="transcript" code="MNCLtrns" description="Return the REPL transcript text.">
+            <result type="text" description="The transcript, one line per REPL line."/>
+        </command>
+        <command name="clear repl" code="MNCLclr " description="Clear the REPL transcript.">
+            <result type="text" description="OK"/>
+        </command>
+    </suite>
+</dictionary>

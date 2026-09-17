@@ -121,6 +121,20 @@ pub fn set_cursor_hints(h: CursorHints) {
 
 static ANIM_DEADLINE_MS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+/// The Lisp worker's join handle, for graceful quit from any path.
+static WORKER_HANDLE: std::sync::OnceLock<std::sync::Mutex<Option<std::thread::JoinHandle<()>>>> =
+    std::sync::OnceLock::new();
+
+/// Tell the worker to stop (its caller pushes `FrameClose`) and wait for
+/// it to leave the JIT. Idempotent.
+pub fn join_worker_for_quit() {
+    if let Some(m) = WORKER_HANDLE.get() {
+        if let Some(h) = m.lock().unwrap_or_else(|e| e.into_inner()).take() {
+            let _ = h.join();
+        }
+    }
+}
+
 /// The system Reduce Motion preference, latched at startup (the worker
 /// reads it once to configure the scroll easing).
 static REDUCE_MOTION: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
@@ -396,6 +410,9 @@ impl WindowManager {
             let types = objc2_foundation::NSArray::from_retained_slice(&[file_url]);
             drop.registerForDraggedTypes(&types);
             view.addSubview(&drop);
+        }
+        if is_main {
+            crate::igui_mac::apple_events::note_main_window(&window);
         }
         // Accessibility: VoiceOver reads these instead of "image"/"view".
         // SAFETY: plain string setters on live objects.
@@ -683,6 +700,9 @@ where
     // CoreText name — see `render::register_font_resolver`). NSFont and
     // CTFont are toll-free bridged: retain + hand the pointer across.
     crate::igui_mac::render::register_font_resolver(system_font_resolver);
+    // Apple Events: application delegate (reopen / open files / graceful
+    // quit) + scripting handlers for the `MNCL` class.
+    crate::igui_mac::apple_events::install(&app, mtm);
 
     let manager = Rc::new(RefCell::new(WindowManager::new(mtm)));
     if let Some((title, w, h)) = &main_window {
@@ -722,11 +742,12 @@ where
     // Handle to the Lisp worker, so the quit path can join it before
     // terminating. Exiting while the worker is mid-JIT-compile segfaults
     // on Apple Silicon (the W^X write-protect toggle is per-thread), so
-    // ⌘Q/`NCL_GUI_QUIT_AFTER_MS` must let the worker reach a quiet point
-    // first. It stops when its central loop sees a `FrameClose`.
-    let worker_handle: Rc<RefCell<Option<std::thread::JoinHandle<()>>>> =
-        Rc::new(RefCell::new(None));
-    let worker_h_t = Rc::clone(&worker_handle);
+    // every quit path (NCL_GUI_QUIT_AFTER_MS, ⌘Q, Apple-event quit) must
+    // let the worker reach a quiet point first — it stops when its central
+    // loop sees a `FrameClose`. Stored globally so the app delegate can
+    // reach it.
+    WORKER_HANDLE.get_or_init(|| std::sync::Mutex::new(None));
+    let worker_h_t = Rc::new(());
     let tick = RcBlock::new(move |_t: NonNull<NSTimer>| {
         // System theme: re-resolve on appearance/accent change and wake the
         // worker with a ThemeChange so it re-templates and repaints.
@@ -790,11 +811,9 @@ where
 
         if QUIT_REQUESTED.swap(false, Ordering::Relaxed) {
             // Graceful quit (NCL_GUI_QUIT_AFTER_MS): stop the worker, wait
-            // for it to leave the JIT, then terminate. See `worker_handle`.
+            // for it to leave the JIT, then terminate.
             igui_events::push(IGuiEvent::FrameClose);
-            if let Some(h) = worker_h_t.borrow_mut().take() {
-                let _ = h.join();
-            }
+            join_worker_for_quit();
             unsafe { app_t.terminate(None) };
         }
         mgr_t.borrow().repaint_dirty();
@@ -862,7 +881,10 @@ where
         .stack_size(8 * 1024 * 1024)
         .spawn(worker)
         .map_err(|e| format!("failed to spawn Lisp worker: {e}"))?;
-    *worker_handle.borrow_mut() = Some(spawned);
+    *WORKER_HANDLE
+        .get_or_init(std::default::Default::default)
+        .lock()
+        .unwrap_or_else(|e| e.into_inner()) = Some(spawned);
 
     app.run();
     Ok(())

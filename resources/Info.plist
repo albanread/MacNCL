@@ -26,6 +26,8 @@
 	<true/>
 	<key>NSSupportsAutomaticGraphicsSwitching</key>
 	<true/>
+	<key>OSAScriptingDefinition</key>
+	<string>MacNCL.sdef</string>
 	<key>CFBundleDocumentTypes</key>
 	<array>
 		<dict>

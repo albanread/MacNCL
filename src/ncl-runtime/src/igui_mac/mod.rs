@@ -16,12 +16,18 @@
 //!
 //! See docs/PORTING_DESIGN.md §4.5–4.6.
 
+/// Apple Events: NSApplication delegate + scripting handlers (mac-gui).
+#[cfg(feature = "mac-gui")]
+pub mod apple_events;
 pub mod anim;
 pub mod events;
 pub mod ide;
 /// The system menu bar (registry + NSMenu install). The registry half is
 /// pure data and always built/tested; the AppKit half is `mac-gui`.
 pub mod menu;
+/// Apple-event scripting bridge (request channel). The AppKit handlers
+/// are `apple_events` (mac-gui); this half is thread plumbing + tests.
+pub mod scripting;
 pub mod render;
 /// Semantic color tokens (light/dark + accent) for the IDE chrome. Pure
 /// data + swap slot always built; NSColor resolution is `mac-gui`.

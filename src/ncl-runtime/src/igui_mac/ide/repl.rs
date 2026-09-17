@@ -143,6 +143,11 @@ impl Repl {
     pub fn info(&mut self, text: &str) {
         self.print(LineKind::Info, text);
     }
+    /// The transcript as plain text (scripting `transcript` command).
+    pub fn transcript_text(&self) -> String {
+        self.transcript.iter().map(|l| l.text.as_str()).collect::<Vec<_>>().join("\n")
+    }
+
     /// Clear the transcript (Cmd-K).
     pub fn clear(&mut self) {
         self.transcript.clear();

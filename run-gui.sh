@@ -109,6 +109,8 @@ if [ "$do_bundle" -eq 1 ] && [ -f "$repo/resources/Info.plist" ] \
   cp "$bin" "$app/Contents/MacOS/ncl"
   cp "$repo/resources/Info.plist" "$app/Contents/Info.plist"
   cp "$repo/resources/AppIcon.icns" "$app/Contents/Resources/AppIcon.icns"
+  [ -f "$repo/resources/MacNCL.sdef" ] \
+    && cp "$repo/resources/MacNCL.sdef" "$app/Contents/Resources/MacNCL.sdef"
   # Refresh the registration so Finder/LaunchServices see the current icon.
   /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
     -f "$app" >/dev/null 2>&1 || true
