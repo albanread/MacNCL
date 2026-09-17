@@ -1069,9 +1069,13 @@ fn wrap_for_repl(src: &str) -> String {
 fn run_repl(session: &mut ncl_compiler::Session) -> ExitCode {
     install_repl_panic_hook();
 
-    println!("NCL {VERSION} REPL");
-    println!("  (exit) or Ctrl+D / Ctrl+Z to leave");
-    println!();
+    // All REPL writes ignore errors on purpose: with output piped to a
+    // reader that exits early (`ncl | head`), println! would panic on
+    // EPIPE and abort the process. Losing a prompt line beats dying.
+    use std::io::Write;
+    let _ = writeln!(std::io::stdout().lock(), "NCL {VERSION} REPL");
+    let _ = writeln!(std::io::stdout().lock(), "  (exit) or Ctrl+D / Ctrl+Z to leave");
+    let _ = writeln!(std::io::stdout().lock());
 
     let stdin_rx = spawn_stdin_reader();
     let mut buf = String::new();
@@ -1093,7 +1097,7 @@ fn run_repl(session: &mut ncl_compiler::Session) -> ExitCode {
             Ok(r) => r,
             Err(_) => {
                 // Reader thread died / EOF.
-                println!();
+                let _ = writeln!(std::io::stdout().lock());
                 break 'repl;
             }
         };
@@ -1101,13 +1105,13 @@ fn run_repl(session: &mut ncl_compiler::Session) -> ExitCode {
         let line = match line_result {
             Ok(s) => s,
             Err(e) => {
-                eprintln!("ncl: stdin: {e}");
+                let _ = writeln!(std::io::stderr().lock(), "ncl: stdin: {e}");
                 return ExitCode::from(1);
             }
         };
         if line.is_empty() {
             // EOF (Ctrl+D / Ctrl+Z).
-            println!();
+            let _ = writeln!(std::io::stdout().lock());
             break;
         }
 
@@ -1134,7 +1138,7 @@ fn run_repl(session: &mut ncl_compiler::Session) -> ExitCode {
                     // "...> " next iteration.
                     continue;
                 }
-                eprintln!("ncl: read error: {:?}", e.kind);
+                let _ = writeln!(std::io::stderr().lock(), "ncl: read error: {:?}", e.kind);
                 buf.clear();
             }
         }
@@ -1149,8 +1153,11 @@ fn run_repl(session: &mut ncl_compiler::Session) -> ExitCode {
 /// before we block on stdin.
 fn print_prompt(fresh: bool) {
     let prompt = if fresh { "ncl> " } else { "...> " };
-    print!("{prompt}");
-    let _ = io::stdout().flush();
+    // Errors ignored: a closed pipe must not panic the REPL (EPIPE).
+    use std::io::Write;
+    let mut out = std::io::stdout().lock();
+    let _ = write!(out, "{prompt}");
+    let _ = out.flush();
 }
 
 /// Spawn a thread that drains stdin line-by-line into a channel.
@@ -1196,9 +1203,22 @@ fn eval_with_recovery(session: &mut ncl_compiler::Session, src: &str) {
     let r = unsafe { setjmp_raw(jmpbuf.as_mut_ptr()) };
     if r == 0 {
         // First entry — try the eval.
+        //
+        // Errors are swallowed on purpose: if our stdout/stderr is a pipe
+        // whose reader has gone away (e.g. `ncl | head`), println! would
+        // panic on EPIPE and take the process down with SIGABRT; a REPL
+        // that dies because its pager exited is worse than a lost line.
         match session.eval(src) {
-            Ok(result) => println!("{result}"),
-            Err(e) => eprintln!("ncl: {e}"),
+            Ok(result) => {
+                use std::io::Write;
+                let mut out = std::io::stdout().lock();
+                let _ = writeln!(out, "{result}");
+                let _ = out.flush();
+            }
+            Err(e) => {
+                use std::io::Write;
+                let _ = writeln!(std::io::stderr().lock(), "ncl: {e}");
+            }
         }
     } else {
         // We just got longjmp'd back. Read whatever the panic hook
@@ -1206,7 +1226,7 @@ fn eval_with_recovery(session: &mut ncl_compiler::Session, src: &str) {
         let msg = REPL_PANIC_MSG.with(|cell| {
             cell.lock().ok().and_then(|mut g| g.take()).unwrap_or_default()
         });
-        eprintln!("ncl: ** recovered from {msg} **");
+        let _ = writeln!(std::io::stderr().lock(), "ncl: ** recovered from {msg} **");
     }
 
     // Disarm the buf so panics OUTSIDE this eval can't longjmp into
