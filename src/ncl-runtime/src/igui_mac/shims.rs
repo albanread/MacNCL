@@ -245,7 +245,7 @@ fn event_to_plist(m: &mut MutatorState, coord: &GcCoordinator, ev: IGuiEvent) ->
             pairs.push((kw(coord, "MODS"), Word::fixnum(mods)));
             pairs.push((kw(coord, "TIME-MS"), Word::fixnum(time_ms)));
         }
-        IGuiEvent::Mouse { child_id, x, y, op, button, mods, wheel_delta, wheel_lines, time_ms } => {
+        IGuiEvent::Mouse { child_id, x, y, op, button, mods, wheel_delta, wheel_lines, wheel_dx, time_ms } => {
             pairs.push((kw(coord, "KIND"), kw(coord, "MOUSE")));
             pairs.push((kw(coord, "CHILD-ID"), Word::fixnum(child_id)));
             pairs.push((kw(coord, "X"), Word::fixnum(x)));
@@ -255,6 +255,7 @@ fn event_to_plist(m: &mut MutatorState, coord: &GcCoordinator, ev: IGuiEvent) ->
             pairs.push((kw(coord, "MODS"), Word::fixnum(mods)));
             pairs.push((kw(coord, "WHEEL-DELTA"), Word::fixnum(wheel_delta)));
             pairs.push((kw(coord, "WHEEL-LINES"), Word::fixnum(wheel_lines)));
+            pairs.push((kw(coord, "WHEEL-DX"), Word::fixnum(wheel_dx)));
             pairs.push((kw(coord, "TIME-MS"), Word::fixnum(time_ms)));
         }
         IGuiEvent::Focus { child_id, gained } => {

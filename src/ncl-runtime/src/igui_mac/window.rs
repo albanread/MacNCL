@@ -108,6 +108,11 @@ pub(crate) fn play_key_click() {
 /// The IDE / main window's id.
 pub const MAIN_ID: i64 = 1;
 
+/// Sub-line remainder of precise (trackpad) scroll deltas, carried between
+/// events so slow scrolling accumulates into whole lines. Only touched on
+/// the main thread inside `dispatch_event`.
+static WHEEL_RESIDUE: std::sync::Mutex<f64> = std::sync::Mutex::new(0.0);
+
 // ── Feel-pass plumbing: cursor hints + animation ticks ─────────────────
 //
 // The worker publishes the IDE's pane geometry (for the cursor hit test)
@@ -1009,7 +1014,7 @@ fn dispatch_event(e: &NSEvent, child_id: i64, view_height: f64) {
     let mouse = |op: i64, button: i64| {
         let p: NSPoint = e.locationInWindow();
         let y = ev::to_top_left_y(p.y, view_height);
-        igui_events::push(ev::mouse_event(child_id, p.x, y, op, button, flags, 0, 0, 0));
+        igui_events::push(ev::mouse_event(child_id, p.x, y, op, button, flags, 0, 0, 0, 0));
     };
 
     if t == NSEventType::LeftMouseDown {
@@ -1027,7 +1032,16 @@ fn dispatch_event(e: &NSEvent, child_id: i64, view_height: f64) {
     } else if t == NSEventType::ScrollWheel {
         let p: NSPoint = e.locationInWindow();
         let y = ev::to_top_left_y(p.y, view_height);
+        let dx = e.scrollingDeltaX();
         let dy = e.scrollingDeltaY();
+        let precise = e.hasPreciseScrollingDeltas();
+        // Trackpad deltas are pixels; classic wheels already report lines.
+        // Fractional lines accumulate in the residue so slow trackpad
+        // scrolling still moves instead of truncating to zero.
+        let lines = igui_events::wheel_lines_from(dy, precise);
+        let mut residue = WHEEL_RESIDUE.lock().unwrap_or_else(|er| er.into_inner());
+        let whole_lines = igui_events::take_whole_lines(lines, &mut residue);
+        drop(residue);
         igui_events::push(ev::mouse_event(
             child_id,
             p.x,
@@ -1036,7 +1050,8 @@ fn dispatch_event(e: &NSEvent, child_id: i64, view_height: f64) {
             0,
             flags,
             dy as i64,
-            dy as i64,
+            whole_lines,
+            dx as i64,
             0,
         ));
     }

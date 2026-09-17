@@ -1130,7 +1130,7 @@ mod tests {
     fn mouse(op: i64, x: f32, y: f32) -> IGuiEvent {
         IGuiEvent::Mouse {
             child_id: 1, x: x as i64, y: y as i64, op, button: 0,
-            mods: 0, wheel_delta: 0, wheel_lines: 0, time_ms: 0,
+            mods: 0, wheel_delta: 0, wheel_lines: 0, wheel_dx: 0, time_ms: 0,
         }
     }
 
@@ -1667,7 +1667,7 @@ mod tests {
         // One impulse of 7 lines over the editor half.
         let wheel = IGuiEvent::Mouse {
             child_id: 1, x: 400, y: 200, op: crate::igui_events::mouse_op::WHEEL, button: 0,
-            mods: 0, wheel_delta: 7, wheel_lines: 7, time_ms: 0,
+            mods: 0, wheel_delta: 7, wheel_lines: 7, wheel_dx: 0, time_ms: 0,
         };
         ide.handle_event(&wheel);
         assert_eq!(ide.ed().scroll_top(), 0, "nothing applied instantly");

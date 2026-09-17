@@ -104,6 +104,11 @@ the in-app toggle.
 - **Tabs** — up to eight chips; past that a **»** menu lists the rest.
 - **Examples** — File ▸ Examples lists the shipped demos; picking one opens it as a
   buffer (⌘R runs it, or load and call its `(run-…)` entry from the REPL).
+- **Mouse scroll** — the wheel (or trackpad) scrolls the pane under the pointer with
+  momentum easing. Trackpad pixel deltas are converted to lines and accumulated, so
+  slow two-finger scrolls move smoothly instead of jumping; horizontal deltas are
+  carried through to Lisp panes as `:wheel-dx` (see the **scroll-pan** example for a
+  viewport that pans on both axes).
 
 ### REPL pane
 

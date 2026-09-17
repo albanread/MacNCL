@@ -93,6 +93,43 @@ pub mod mouse_op {
     pub const DRAG: i64 = 8;
 }
 
+// ── Scroll-unit conversion ─────────────────────────────────────────────────
+//
+// Classic mouse wheels report deltas already measured in lines; trackpads
+// report pixel-precise deltas (tens of pixels per gesture tick, a fraction
+// of a line). Consumers below the event (IDE momentum, Lisp panes) work in
+// lines, so the producer converts pixels once and quantises.
+
+/// Pixels per "line" when converting precise trackpad deltas. Roughly one
+/// text line at the IDE's default UI text size.
+pub const WHEEL_PX_PER_LINE: f64 = 14.0;
+
+/// Convert a raw vertical scroll delta to lines. `precise` marks
+/// pixel-precise (trackpad) deltas; classic wheel deltas pass through
+/// unchanged. Flicks and momentum bursts are clamped so one event can't
+/// teleport the viewport.
+pub fn wheel_lines_from(delta: f64, precise: bool) -> f64 {
+    if !precise {
+        return delta.clamp(-20.0, 20.0);
+    }
+    (delta / WHEEL_PX_PER_LINE).clamp(-20.0, 20.0)
+}
+
+/// Quantise fractional line deltas to whole lines, keeping the remainder
+/// in `residue` so slow trackpad scrolling (a fifth of a line per event)
+/// still accumulates into motion instead of truncating to zero.
+/// Returns the whole lines to emit this event.
+pub fn take_whole_lines(lines: f64, residue: &mut f64) -> i64 {
+    *residue += lines;
+    // Don't let an idle fraction linger across gestures forever.
+    if residue.abs() < 1.0 && lines.abs() < 0.01 {
+        *residue = 0.0;
+    }
+    let whole = residue.trunc();
+    *residue -= whole;
+    whole as i64
+}
+
 /// Modifier-key bits as a packed `i64`. Matches Win32 GetKeyState bit
 /// layout where convenient; CP code reads the named bits via
 /// `iGui.Mod*` constants.
@@ -166,8 +203,9 @@ pub enum IGuiEvent {
         op: i64, // mouse_op::*
         button: i64,
         mods: i64,
-        wheel_delta: i64,
-        wheel_lines: i64,
+        wheel_delta: i64, // vertical, raw pixels (signed; + = toward start)
+        wheel_lines: i64, // vertical, whole lines (accumulated when precise)
+        wheel_dx: i64,    // horizontal, raw pixels (signed; + = toward start)
         time_ms: i64,
     },
     Focus {
@@ -546,4 +584,45 @@ pub fn next_event(timeout_ms: i64) -> Option<IGuiEvent> {
 /// reset by the arrival of other events.
 pub fn next_event_for(target: i64, timeout_ms: i64) -> Option<IGuiEvent> {
     get_or_create_queue(target).wait_pop(make_deadline(timeout_ms))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wheel_lines_passthrough_for_classic_mouse() {
+        assert_eq!(wheel_lines_from(3.0, false), 3.0);
+        assert_eq!(wheel_lines_from(-1.0, false), -1.0);
+    }
+
+    #[test]
+    fn wheel_lines_converts_trackpad_pixels() {
+        assert_eq!(wheel_lines_from(28.0, true), 2.0);
+        assert_eq!(wheel_lines_from(-7.0, true), -0.5);
+    }
+
+    #[test]
+    fn wheel_lines_clamps_flicks() {
+        assert_eq!(wheel_lines_from(500.0, true), 20.0);
+        assert_eq!(wheel_lines_from(-500.0, false), -20.0);
+    }
+
+    #[test]
+    fn whole_lines_accumulate_sub_line_deltas() {
+        let mut r = 0.0;
+        // Five fifth-of-a-line trackpad events: 0,0,0,0,1 emitted.
+        for _ in 0..4 {
+            assert_eq!(take_whole_lines(0.2, &mut r), 0);
+        }
+        assert_eq!(take_whole_lines(0.2, &mut r), 1);
+        assert!((r - 0.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn whole_lines_emit_mouse_notches_immediately() {
+        let mut r = 0.0;
+        assert_eq!(take_whole_lines(3.0, &mut r), 3);
+        assert_eq!(take_whole_lines(-2.0, &mut r), -2);
+    }
 }

@@ -238,6 +238,7 @@ pub fn mouse_event(
     flags: u64,
     wheel_delta: i64,
     wheel_lines: i64,
+    wheel_dx: i64,
     time_ms: i64,
 ) -> IGuiEvent {
     IGuiEvent::Mouse {
@@ -249,6 +250,7 @@ pub fn mouse_event(
         mods: mods_from_flags(flags),
         wheel_delta,
         wheel_lines,
+        wheel_dx,
         time_ms,
     }
 }
@@ -374,7 +376,7 @@ mod tests {
             _ => panic!("expected Key"),
         }
         // Left mouse down at (10, 20) top-left.
-        let ev = mouse_event(7, 10.0, 20.0, ns_mouse::left_down(), 0, 0, 0, 0, 99);
+        let ev = mouse_event(7, 10.0, 20.0, ns_mouse::left_down(), 0, 0, 0, 0, 0, 99);
         match ev {
             IGuiEvent::Mouse { x, y, op, .. } => {
                 assert_eq!((x, y), (10, 20));
