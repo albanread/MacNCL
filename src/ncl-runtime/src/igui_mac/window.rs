@@ -934,10 +934,11 @@ fn dispatch_event(e: &NSEvent, child_id: i64, view_height: f64) {
         igui_events::push(ev::key_event(child_id, keycode, ch, flags, e.isARepeat(), down, 0));
         if down {
             if let Some(c) = ch {
-                // Command combos are menu accelerators, not text: real Mac
-                // apps never insert a character for them. (⌘Q/⌘H etc. are
-                // not in our registry and still reach AppKit's menu.)
-                if !c.is_control() && flags & ev::nsflags::COMMAND == 0 {
+                // Only real text becomes a Char event: Command combos are
+                // menu accelerators, and AppKit's function-key characters
+                // (arrows, Home/End, PageUp/Down, forward delete —
+                // U+F700–U+F7FF) drive the Key event, not text input.
+                if ev::is_text_character(c) && flags & ev::nsflags::COMMAND == 0 {
                     igui_events::push(ev::char_event(child_id, c as u32, flags, 0));
                 }
             }

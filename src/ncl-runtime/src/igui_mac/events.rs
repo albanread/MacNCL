@@ -179,6 +179,16 @@ pub fn resolve_vkey(keycode: u16, chars_ignoring_mods: Option<char>) -> i64 {
     chars_ignoring_mods.map(vkey_from_char).unwrap_or(0)
 }
 
+/// Whether a `charactersIgnoringModifiers` character is real TEXT the
+/// editor should insert — controls never are, and neither are AppKit's
+/// function-key characters (arrows, Home/End, PageUp/Down, forward
+/// delete, F1–F12…), which live in the private-use range U+F700–U+F7FF
+/// (`NSUpArrowFunctionKey` etc.). Letting those through made arrow keys
+/// navigate *and* insert invisible junk.
+pub fn is_text_character(c: char) -> bool {
+    !c.is_control() && !('\u{F700}'..='\u{F7FF}').contains(&c)
+}
+
 /// Convert a y coordinate from `NSEvent`'s window space (bottom-left
 /// origin, y-up) to top-left, y-down view space matching the `SurfaceCmd`
 /// IR. `view_height` is the content view's height in points.
@@ -323,6 +333,24 @@ mod tests {
         assert_eq!(resolve_vkey(0x00, Some('k')), 0x4B);
         // Nothing usable.
         assert_eq!(resolve_vkey(0x00, None), 0);
+    }
+
+    #[test]
+    fn text_character_filter_excludes_function_keys() {
+        // Real text inserts.
+        for c in ['a', 'Z', '5', ' ', 'λ', '(', '\\', '"'] {
+            assert!(is_text_character(c), "{c:?} should be text");
+        }
+        // Controls: tab, return, escape, backspace(DEL).
+        for c in ['\t', '\r', '\u{1b}', '\u{7f}'] {
+            assert!(!is_text_character(c), "{c:?} is a control, not text");
+        }
+        // AppKit function-key characters (private use U+F700–U+F7FF):
+        // arrows, forward delete, Home/End, PageUp/Down, F-keys.
+        for c in ['\u{f700}', '\u{f701}', '\u{f702}', '\u{f703}', '\u{f728}',
+                  '\u{f729}', '\u{f72b}', '\u{f72c}', '\u{f72d}', '\u{f704}'] {
+            assert!(!is_text_character(c), "U+{:04X} is a function key, not text", c as u32);
+        }
     }
 
     #[test]
