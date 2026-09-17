@@ -96,6 +96,8 @@ New) opens a buffer, in addition to ⌘T.
 - **Font** — SF Mono (Menlo fallback) with SF Pro chrome; **⌘=/⌘−** zoom code
   12–20pt.
 - **Tabs** — up to eight chips; past that a **»** menu lists the rest.
+- **Examples** — File ▸ Examples lists the shipped demos; picking one opens it as a
+  buffer (⌘R runs it, or load and call its `(run-…)` entry from the REPL).
 
 ### REPL pane
 

@@ -25,6 +25,8 @@ pub mod ide;
 /// The system menu bar (registry + NSMenu install). The registry half is
 /// pure data and always built/tested; the AppKit half is `mac-gui`.
 pub mod menu;
+/// Lisp file locations: bundle Resources vs development repo (pure).
+pub mod paths;
 /// Apple-event scripting bridge (request channel). The AppKit handlers
 /// are `apple_events` (mac-gui); this half is thread plumbing + tests.
 pub mod scripting;

@@ -111,6 +111,10 @@ if [ "$do_bundle" -eq 1 ] && [ -f "$repo/resources/Info.plist" ] \
   cp "$repo/resources/AppIcon.icns" "$app/Contents/Resources/AppIcon.icns"
   [ -f "$repo/resources/MacNCL.sdef" ] \
     && cp "$repo/resources/MacNCL.sdef" "$app/Contents/Resources/MacNCL.sdef"
+  # The standard library + demos ship as app resources (read-only); the
+  # dev fallback (repo Lisp/) still applies to the bare binary.
+  rm -rf "$app/Contents/Resources/Lisp"
+  cp -R "$repo/Lisp" "$app/Contents/Resources/Lisp"
   # Refresh the registration so Finder/LaunchServices see the current icon.
   /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister \
     -f "$app" >/dev/null 2>&1 || true

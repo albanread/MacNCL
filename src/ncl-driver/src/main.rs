@@ -936,29 +936,17 @@ fn lisp_main(raw_args: Vec<String>) -> ExitCode {
 ///   3. <exe_dir>/../../Lisp/Library  (developer running cargo run)
 ///
 /// Anything not found falls through to None; the loader is optional.
+/// The standard-library directory: `NCL_LIBRARY` (legacy, points at the
+/// Library dir itself) → `<lisp_root>/Library` where the root resolves
+/// bundle-first (see `igui_mac::paths`).
 fn find_library_dir() -> Option<String> {
     if let Ok(p) = std::env::var("NCL_LIBRARY") {
         if std::path::Path::new(&p).is_dir() {
             return Some(p);
         }
     }
-    let exe = std::env::current_exe().ok()?;
-    let exe_dir = exe.parent()?;
-    let beside = exe_dir.join("Library");
-    if beside.is_dir() {
-        return Some(beside.to_string_lossy().into_owned());
-    }
-    // Dev fallback: target/release/ncl.exe → repo-root/Lisp/Library
-    let dev = exe_dir
-        .ancestors()
-        .nth(2)
-        .map(|p| p.join("Lisp").join("Library"));
-    if let Some(d) = dev {
-        if d.is_dir() {
-            return Some(d.to_string_lossy().into_owned());
-        }
-    }
-    None
+    ncl_runtime::igui_mac::paths::lisp_dir()
+        .map(|d| d.join("Library").to_string_lossy().into_owned())
 }
 
 // ─── setjmp/longjmp bindings ────────────────────────────────────────────

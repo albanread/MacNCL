@@ -550,6 +550,36 @@ pub fn install(app: &NSApplication, mtm: objc2::MainThreadMarker) {
             recents_root.setTitle(&NSString::from_str("Open Recent"));
             recents_root.setSubmenu(Some(&recents));
             m.addItem(&recents_root);
+            // Examples ▸ — the shipped demos (bundle Resources/Lisp/demos,
+            // or the repo's in dev), listed name-sorted. Picking one opens
+            // it as a buffer (⌘R runs it).
+            let examples = NSMenu::new(mtm);
+            let ex_files = crate::igui_mac::paths::example_files(
+                &crate::igui_mac::paths::lisp_dir().unwrap_or_default(),
+            );
+            if ex_files.is_empty() {
+                let it = NSMenuItem::new(mtm);
+                it.setTitle(&NSString::from_str("No Examples Found"));
+                it.setEnabled(false);
+                examples.addItem(&it);
+            } else {
+                for (name, path) in ex_files {
+                    let it = NSMenuItem::new(mtm);
+                    it.setTitle(&NSString::from_str(&name));
+                    // SAFETY: plain string value.
+                    unsafe { it.setRepresentedObject(Some(&NSString::from_str(&path))) };
+                    // SAFETY: dispatcher outlives the menu; known selector.
+                    unsafe {
+                        it.setTarget(Some(target));
+                        it.setAction(Some(objc2::sel!(nclOpenExample:)));
+                    }
+                    examples.addItem(&it);
+                }
+            }
+            let examples_root = NSMenuItem::new(mtm);
+            examples_root.setTitle(&NSString::from_str("Examples"));
+            examples_root.setSubmenu(Some(&examples));
+            m.addItem(&examples_root);
             // Close Tab (⌘W), Save (⌘S) from the registry.
             let it = cmd_item(spec.items[1].label, spec.items[1].key.as_ref(), spec.items[1].opcode);
             m.addItem(&it);
@@ -675,10 +705,23 @@ objc2::define_class!(
             run_save_panel();
         }
 
-        /// Open Recent ▸ — the item carries the full path in its
-        /// representedObject.
+        /// Open Recent ▸ / Examples ▸ — the item carries the full path in
+        /// its representedObject.
         #[unsafe(method(nclOpenRecent:))]
         fn open_recent(&self, sender: Option<&objc2::runtime::AnyObject>) {
+            let Some(item) = sender else { return };
+            let path: Option<objc2::rc::Retained<objc2_foundation::NSString>> =
+                unsafe { objc2::msg_send![item, representedObject] };
+            if let Some(p) = path {
+                crate::igui_events::push(crate::igui_events::IGuiEvent::Open {
+                    path: p.to_string(),
+                });
+            }
+        }
+
+        /// Examples ▸ pick (same shape as recents).
+        #[unsafe(method(nclOpenExample:))]
+        fn open_example(&self, sender: Option<&objc2::runtime::AnyObject>) {
             let Some(item) = sender else { return };
             let path: Option<objc2::rc::Retained<objc2_foundation::NSString>> =
                 unsafe { objc2::msg_send![item, representedObject] };
