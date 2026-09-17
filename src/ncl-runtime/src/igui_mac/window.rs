@@ -75,6 +75,29 @@ fn system_font_resolver(
     unsafe { Some(core_text::font::CTFont::wrap_under_get_rule(ptr)) }
 }
 
+/// The key-click sound. NSSound is main-thread here (called from the
+/// event monitor); the raw pointer wrapper just makes it storable in a
+/// static — never touched off the main thread.
+#[cfg(feature = "mac-gui")]
+fn play_key_click() {
+    use objc2_app_kit::{NSSound, NSSoundName};
+    use std::sync::atomic::{AtomicPtr, Ordering};
+
+    static CLICK: AtomicPtr<NSSound> = AtomicPtr::new(std::ptr::null_mut());
+    let ptr = CLICK.load(Ordering::Relaxed);
+    // SAFETY: created and only ever used on the main thread; leaked once.
+    let sound: &NSSound = if ptr.is_null() {
+        let sound = NSSound::soundNamed(&NSSoundName::from_str("Tink"));
+        let Some(sound) = sound else { return };
+        let raw = objc2::rc::Retained::into_raw(sound);
+        CLICK.store(raw, Ordering::Relaxed);
+        unsafe { &*raw }
+    } else {
+        unsafe { &*ptr }
+    };
+    sound.play();
+}
+
 /// The IDE / main window's id.
 pub const MAIN_ID: i64 = 1;
 
@@ -790,6 +813,11 @@ where
         // fire the item AND our key path would see the event. Pure-AppKit
         // combos (⌘Q, ⌘H, ⌘M) are not registered and flow on untouched.
         if e.r#type() == NSEventType::KeyDown {
+            // Key Clicks (opt-in): a short system sound per real keypress —
+            // repeats excluded so held keys don't machine-gun.
+            if menu::key_clicks_enabled() && !e.isARepeat() {
+                play_key_click();
+            }
             let mods = ev::mods_from_flags(e.modifierFlags().0 as u64)
                 & (modifier::SHIFT | modifier::CONTROL | modifier::ALT | modifier::WIN);
             if let Some(op) = menu::key_equivalent_cmd(e.keyCode() as u16, mods) {

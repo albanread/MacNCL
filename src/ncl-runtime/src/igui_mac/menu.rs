@@ -132,13 +132,22 @@ pub static MENUS: &[MenuSpec] = &[
 ];
 
 /// Keyed items in the app (first) menu. About/Hide/Quit are AppKit actions;
-/// Settings is ours.
-pub static APP_KEYED: &[ItemSpec] = &[ItemSpec {
-    name: "settings",
-    label: "Settings…",
-    opcode: menu_cmd::SETTINGS,
-    key: Some(KeyEq { kvk: kvk::COMMA, mods: modifier::WIN }),
-}];
+/// Settings is ours. `Key Clicks` toggles the keypress sound (handled on
+/// the main thread — the state is the static below, no worker round-trip).
+pub static APP_KEYED: &[ItemSpec] = &[
+    ItemSpec {
+        name: "settings",
+        label: "Settings…",
+        opcode: menu_cmd::SETTINGS,
+        key: Some(KeyEq { kvk: kvk::COMMA, mods: modifier::WIN }),
+    },
+    ItemSpec {
+        name: "key-clicks",
+        label: "Key Clicks",
+        opcode: menu_cmd::KEY_CLICKS,
+        key: None,
+    },
+];
 
 /// Every registry item, in menu order.
 fn all_items() -> impl Iterator<Item = &'static ItemSpec> {
@@ -171,6 +180,18 @@ pub fn opcode_for_name(name: &str) -> Option<i64> {
 // ── Item enablement (Save) ────────────────────────────────────────────────
 
 static SAVE_ENABLED: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(true);
+
+/// Whether keypresses play a click (opt-in; off by default — quiet like a
+/// native Mac editor until asked otherwise).
+static KEY_CLICKS: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+
+pub fn key_clicks_enabled() -> bool {
+    KEY_CLICKS.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+pub fn set_key_clicks(on: bool) {
+    KEY_CLICKS.store(on, std::sync::atomic::Ordering::Relaxed);
+}
 
 /// Publish whether Save should be enabled (the active buffer is dirty).
 /// Called from the worker; read by `validateMenuItem:` on the main thread
@@ -442,12 +463,14 @@ pub fn install(app: &NSApplication, mtm: objc2::MainThreadMarker) {
             as *const objc2::runtime::AnyObject)
     };
 
-    let cmd_item = |label: &str, key: &KeyEq, opcode: i64| -> Retained<NSMenuItem> {
+    let cmd_item = |label: &str, key: Option<&KeyEq>, opcode: i64| -> Retained<NSMenuItem> {
         let it = NSMenuItem::new(mtm);
         it.setTitle(&NSString::from_str(label));
-        let (eq, mask) = ns_key_equivalent(key);
-        it.setKeyEquivalent(&NSString::from_str(&eq));
-        it.setKeyEquivalentModifierMask(mask);
+        if let Some(k) = key {
+            let (eq, mask) = ns_key_equivalent(k);
+            it.setKeyEquivalent(&NSString::from_str(&eq));
+            it.setKeyEquivalentModifierMask(mask);
+        }
         it.setTag(opcode as isize);
         // SAFETY: setters with plain values on a live item; the dispatcher
         // target outlives the menu (process lifetime).
@@ -468,7 +491,7 @@ pub fn install(app: &NSApplication, mtm: objc2::MainThreadMarker) {
     app_menu.addItem(&about);
     app_menu.addItem(&NSMenuItem::separatorItem(mtm));
     for spec in APP_KEYED {
-        let it = cmd_item(spec.label, spec.key.as_ref().unwrap(), spec.opcode);
+        let it = cmd_item(spec.label, spec.key.as_ref(), spec.opcode);
         app_menu.addItem(&it);
     }
     app_menu.addItem(&NSMenuItem::separatorItem(mtm));
@@ -517,7 +540,7 @@ pub fn install(app: &NSApplication, mtm: objc2::MainThreadMarker) {
                 it
             };
             // New (⌘N)
-            let it = cmd_item(spec.items[0].label, spec.items[0].key.as_ref().unwrap(), spec.items[0].opcode);
+            let it = cmd_item(spec.items[0].label, spec.items[0].key.as_ref(), spec.items[0].opcode);
             m.addItem(&it);
             m.addItem(&dispatcher_item("Open…", "o", MF::Command, objc2::sel!(nclOpenDocument:)));
             // Open Recent ▸ (rebuilt from the store; see apply_recents_rebuild)
@@ -528,16 +551,16 @@ pub fn install(app: &NSApplication, mtm: objc2::MainThreadMarker) {
             recents_root.setSubmenu(Some(&recents));
             m.addItem(&recents_root);
             // Close Tab (⌘W), Save (⌘S) from the registry.
-            let it = cmd_item(spec.items[1].label, spec.items[1].key.as_ref().unwrap(), spec.items[1].opcode);
+            let it = cmd_item(spec.items[1].label, spec.items[1].key.as_ref(), spec.items[1].opcode);
             m.addItem(&it);
-            let it = cmd_item(spec.items[2].label, spec.items[2].key.as_ref().unwrap(), spec.items[2].opcode);
+            let it = cmd_item(spec.items[2].label, spec.items[2].key.as_ref(), spec.items[2].opcode);
             m.addItem(&it);
             m.addItem(&dispatcher_item(
                 "Save As…", "S", MF::Command | MF::Shift, objc2::sel!(nclSaveDocumentAs:),
             ));
         } else {
             for it in spec.items {
-                let item = cmd_item(it.label, it.key.as_ref().unwrap(), it.opcode);
+                let item = cmd_item(it.label, it.key.as_ref(), it.opcode);
                 m.addItem(&item);
             }
         }
@@ -624,6 +647,15 @@ objc2::define_class!(
         fn dispatch(&self, sender: Option<&objc2::runtime::AnyObject>) {
             let Some(item) = sender else { return };
             let tag: isize = unsafe { objc2::msg_send![item, tag] };
+            if tag as i64 == menu_cmd::KEY_CLICKS {
+                // Handled entirely on the main thread (state + checkmark).
+                let on = !key_clicks_enabled();
+                set_key_clicks(on);
+                // SAFETY: setState with a NSControlStateValue on the item.
+                let state: isize = if on { 1 } else { 0 };
+                let _: () = unsafe { objc2::msg_send![item, setState: state] };
+                return;
+            }
             crate::igui_events::push(crate::igui_events::IGuiEvent::Menu {
                 menu_id: menu_cmd::IDE,
                 item_id: tag as i64,
@@ -661,6 +693,13 @@ objc2::define_class!(
         fn validate(&self, sender: Option<&objc2::runtime::AnyObject>) -> objc2::runtime::Bool {
             let Some(item) = sender else { return true.into() };
             let tag: isize = unsafe { objc2::msg_send![item, tag] };
+            if tag as i64 == menu_cmd::KEY_CLICKS {
+                // Keep the checkmark in sync with the shared state.
+                // SAFETY: setState with a NSControlStateValue.
+                let state: isize = if key_clicks_enabled() { 1 } else { 0 };
+                let _: () = unsafe { objc2::msg_send![item, setState: state] };
+                return true.into();
+            }
             let enabled = tag as i64 != menu_cmd::SAVE || save_enabled();
             enabled.into()
         }
@@ -694,6 +733,7 @@ mod tests {
             menu_cmd::COMMENT, menu_cmd::RUN_BUFFER, menu_cmd::EVAL_FORM,
             menu_cmd::CLEAR_REPL, menu_cmd::FOCUS_EDITOR, menu_cmd::FOCUS_REPL,
             menu_cmd::HELP, menu_cmd::FONT_UP, menu_cmd::FONT_DOWN,
+            menu_cmd::KEY_CLICKS,
         ]
     }
 
@@ -779,6 +819,14 @@ mod tests {
         assert_eq!(opcode_for_name("run-buffer"), Some(menu_cmd::RUN_BUFFER));
         assert_eq!(opcode_for_name("Eval-Form"), Some(menu_cmd::EVAL_FORM));
         assert_eq!(opcode_for_name("bogus"), None);
+    }
+
+    #[test]
+    fn key_clicks_flag_flips() {
+        let before = key_clicks_enabled();
+        set_key_clicks(!before);
+        assert_eq!(key_clicks_enabled(), !before);
+        set_key_clicks(before);
     }
 
     #[test]

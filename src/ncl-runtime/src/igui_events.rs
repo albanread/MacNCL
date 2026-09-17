@@ -134,6 +134,7 @@ pub mod menu_cmd {
     pub const HELP: i64 = 19;
     pub const FONT_UP: i64 = 20;
     pub const FONT_DOWN: i64 = 21;
+    pub const KEY_CLICKS: i64 = 22;
 }
 
 // ── Event enum ──────────────────────────────────────────────────────────────
