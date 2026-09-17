@@ -193,6 +193,69 @@ pub fn set_key_clicks(on: bool) {
     KEY_CLICKS.store(on, std::sync::atomic::Ordering::Relaxed);
 }
 
+/// Flip the key-click toggle; returns the new state. The single mutation
+/// point for the flag (menu pick, NCL_GUI_MENU injection, env hook).
+pub fn toggle_key_clicks() -> bool {
+    let on = !key_clicks_enabled();
+    set_key_clicks(on);
+    on
+}
+
+/// Test hook: force the toggle on at launch (`NCL_KEY_CLICKS_ON=1`) so the
+/// sound path can be exercised headlessly.
+pub fn apply_env_override() {
+    if std::env::var_os("NCL_KEY_CLICKS_ON").is_some() {
+        set_key_clicks(true);
+    }
+}
+
+/// Whether the system allows user-interface sound effects (System Settings
+/// ▸ Sound ▸ "Play user interface sound effects"). NSSound playback does
+/// not consult this preference, so our UI-feedback sounds check it here.
+#[cfg(feature = "mac-gui")]
+pub fn ui_sounds_enabled() -> bool {
+    ui_sounds_from_pref(read_ui_sounds_pref())
+}
+
+/// Absent preference = system default = enabled.
+fn ui_sounds_from_pref(v: Option<bool>) -> bool {
+    v.unwrap_or(true)
+}
+
+#[cfg(feature = "mac-gui")]
+fn read_ui_sounds_pref() -> Option<bool> {
+    use core_foundation::base::TCFType;
+    use core_foundation::string::{CFString, CFStringRef};
+
+    // The Rust wrappers don't expose the cross-domain read, so bind the C
+    // entry point directly (CoreFoundation is always linked).
+    #[link(name = "CoreFoundation", kind = "framework")]
+    unsafe extern "C" {
+        fn CFPreferencesGetAppBooleanValue(
+            key: CFStringRef,
+            app_id: CFStringRef,
+            key_exists_and_has_valid_format: *mut u8,
+        ) -> u8;
+    }
+
+    let key = CFString::new("com.apple.sound.uiaudio.enabled");
+    let app = CFString::new("com.apple.systemsound");
+    // SAFETY: plain read of another domain's preference; the out-pointer
+    // distinguishes "off" from "key absent".
+    unsafe {
+        let mut exists: u8 = 0;
+        let on = CFPreferencesGetAppBooleanValue(
+            key.as_concrete_TypeRef(),
+            app.as_concrete_TypeRef(),
+            &mut exists,
+        );
+        if exists == 0 {
+            return None;
+        }
+        Some(on != 0)
+    }
+}
+
 /// Publish whether Save should be enabled (the active buffer is dirty).
 /// Called from the worker; read by `validateMenuItem:` on the main thread
 /// when the menu opens.
@@ -492,6 +555,13 @@ pub fn install(app: &NSApplication, mtm: objc2::MainThreadMarker) {
     app_menu.addItem(&NSMenuItem::separatorItem(mtm));
     for spec in APP_KEYED {
         let it = cmd_item(spec.label, spec.key.as_ref(), spec.opcode);
+        if spec.opcode == menu_cmd::KEY_CLICKS {
+            // Sync the checkmark at install too: macOS 26 pre-renders menus
+            // and may never ask validatesMenuItem: for the initial state.
+            // SAFETY: setState with a NSControlStateValue.
+            let state: isize = if key_clicks_enabled() { 1 } else { 0 };
+            let _: () = unsafe { objc2::msg_send![&it, setState: state] };
+        }
         app_menu.addItem(&it);
     }
     app_menu.addItem(&NSMenuItem::separatorItem(mtm));
@@ -679,11 +749,16 @@ objc2::define_class!(
             let tag: isize = unsafe { objc2::msg_send![item, tag] };
             if tag as i64 == menu_cmd::KEY_CLICKS {
                 // Handled entirely on the main thread (state + checkmark).
-                let on = !key_clicks_enabled();
-                set_key_clicks(on);
+                let on = toggle_key_clicks();
                 // SAFETY: setState with a NSControlStateValue on the item.
                 let state: isize = if on { 1 } else { 0 };
                 let _: () = unsafe { objc2::msg_send![item, setState: state] };
+                // Audible confirmation when switching on: the user hears
+                // exactly the sound the toggle just enabled, so the state
+                // can never be ambiguous from the checkmark alone.
+                if on {
+                    crate::igui_mac::window::play_key_click();
+                }
                 return;
             }
             crate::igui_events::push(crate::igui_events::IGuiEvent::Menu {
@@ -870,6 +945,25 @@ mod tests {
         set_key_clicks(!before);
         assert_eq!(key_clicks_enabled(), !before);
         set_key_clicks(before);
+    }
+
+    #[test]
+    fn key_clicks_toggle_returns_new_state() {
+        let before = key_clicks_enabled();
+        assert_eq!(toggle_key_clicks(), !before);
+        assert_eq!(key_clicks_enabled(), !before);
+        assert_eq!(toggle_key_clicks(), before);
+        assert_eq!(key_clicks_enabled(), before);
+    }
+
+    /// The click sound must be silent when the system UI-sounds preference
+    /// is off, and follow the system default (on) when the key is unset —
+    /// NSSound itself ignores this preference, so we gate playback on it.
+    #[test]
+    fn ui_sounds_pref_defaults_on() {
+        assert!(ui_sounds_from_pref(None), "absent key means enabled");
+        assert!(ui_sounds_from_pref(Some(true)));
+        assert!(!ui_sounds_from_pref(Some(false)));
     }
 
     #[test]

@@ -79,9 +79,16 @@ fn system_font_resolver(
 /// event monitor); the raw pointer wrapper just makes it storable in a
 /// static — never touched off the main thread.
 #[cfg(feature = "mac-gui")]
-fn play_key_click() {
+pub(crate) fn play_key_click() {
     use objc2_app_kit::{NSSound, NSSoundName};
     use std::sync::atomic::{AtomicPtr, Ordering};
+
+    // NSSound ignores the system "Play user interface sound effects"
+    // preference (System Settings ▸ Sound); honor it here so the clicks
+    // are quiet exactly when the user turned UI sounds off.
+    if !menu::ui_sounds_enabled() {
+        return;
+    }
 
     static CLICK: AtomicPtr<NSSound> = AtomicPtr::new(std::ptr::null_mut());
     let ptr = CLICK.load(Ordering::Relaxed);
@@ -692,6 +699,9 @@ where
 
     // The system menu bar replaces the old in-window menu: real ⌘-glyph
     // items whose picks arrive as `IGuiEvent::Menu` (see `igui_mac::menu`).
+    // NCL_KEY_CLICKS_ON=1: test hook to force the toggle on at launch so
+    // the sound path can be exercised without menu interaction.
+    menu::apply_env_override();
     menu::install(&app, mtm);
     // Resolve the semantic theme once up front (appearance + accent) so
     // the worker's very first batch already uses system colors.

@@ -372,10 +372,18 @@ fn run_mac_gui(raw_args: Vec<String>) -> ExitCode {
         if let Some(name) = std::env::var_os("NCL_GUI_MENU") {
             let name = name.to_string_lossy().into_owned();
             match ncl_runtime::igui_mac::menu::opcode_for_name(&name) {
-                Some(op) => igui_events::push(IGuiEvent::Menu {
-                    menu_id: ncl_runtime::igui_events::menu_cmd::IDE,
-                    item_id: op,
-                }),
+                Some(op) => {
+                    // Key Clicks is main-thread state (checkmark + sound);
+                    // the IDE ignores its opcode, so toggle directly.
+                    if op == ncl_runtime::igui_events::menu_cmd::KEY_CLICKS {
+                        ncl_runtime::igui_mac::menu::toggle_key_clicks();
+                    } else {
+                        igui_events::push(IGuiEvent::Menu {
+                            menu_id: ncl_runtime::igui_events::menu_cmd::IDE,
+                            item_id: op,
+                        });
+                    }
+                }
                 None => ide.error(&format!("NCL_GUI_MENU: unknown command {name:?}")),
             }
         }

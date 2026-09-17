@@ -70,6 +70,12 @@ Help) with their ⌘-glyph shortcuts shown; picking an item flows through the sa
 mailbox as the keyboard. ⌘Q/⌘H/⌘M behave as standard Mac app controls. New: **⌘N** (File ▸
 New) opens a buffer, in addition to ⌘T.
 
+The app menu's **Key Clicks** toggle plays a short system sound on each keypress. It is
+off by default; turning it on plays one confirmation click so the state is never
+ambiguous. Clicks also honour the system-wide *Play user interface sound effects*
+preference (System Settings ▸ Sound) — with that off, MacNCL stays quiet regardless of
+the in-app toggle.
+
 ### Editor pane — a rich Lisp editor
 
 - **Syntax highlighting** — special forms, `:keywords`, numbers, strings (multi-line
