@@ -59,3 +59,6 @@ ncl-stderr*.txt
 
 # Editor scratch.
 /scratchpad
+
+# installer build output
+/dist/

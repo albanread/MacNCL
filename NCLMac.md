@@ -204,6 +204,50 @@ GUI, two environment hooks make the live window inspectable headlessly:
 
 ---
 
+## Distribution
+
+`make-dmg.sh` produces `dist/MacNCL-<version>.dmg` — a drag-install disk image,
+the standard distribution shape for a Mac application that installs into
+`/Applications` without admin privileges:
+
+```sh
+./make-dmg.sh              # release build -> staged bundle -> styled, compressed DMG
+./make-dmg.sh --no-layout  # same, minus the Finder window styling (no Finder
+                           # Automation permission prompt)
+```
+
+What the user sees when they open the image: a 660×400 window with a custom
+background (title, subtitle, and two marked drop zones); the `MacNCL.app` icon
+sits in the left zone, an `Applications` symlink in the right, and the install
+gesture is one drag between them. The background art lives in
+`resources/dmg-background.png` (2× Retina: 1320×800).
+
+The pipeline behind it:
+
+1. `cargo build --release -p ncl-driver --features mac-gui`
+2. Stage `MacNCL.app` — binary, `Info.plist`, icon, `MacNCL.sdef`, and a full
+   copy of `Lisp/` under `Contents/Resources/Lisp/` so the app boots with its
+   standard library and the Examples menu with no repo checkout.
+3. Ad-hoc `codesign` (adds no identity; keeps Gatekeeper deterministic in dev).
+4. `hdiutil create -format UDRW` → mount → write the volume's `.DS_Store`
+   directly (window bounds, icon view, background, icon positions) with the
+   Python `ds_store` library, installed into a throwaway venv under `dist/` →
+   detach → `hdiutil convert -format UDZO` → `hdiutil verify`.
+
+   The styling is written file-level rather than through Finder AppleScript
+   because the macOS 26 Finder no longer exposes `view options` & co. to
+   AppleScript. With no network (or `--no-layout`) the script falls back to a
+   plain, unstyled image.
+
+Signing notes: for distribution outside your own machines you need a Developer
+ID Application certificate plus a notarization ticket (`notarytool submit` +
+`stapler`); the ad-hoc signature this script applies is for local use only.
+Code-signing for real also activates the `MacNCL.sdef` dictionary so
+AppleScript can use named terms (`tell application "MacNCL" to eval "..."`)
+instead of the raw `«event MNCLeval»` form.
+
+---
+
 ## Roadmap
 
 - Inline diagnostics (compile-check underlines) and multi-buffer / tabs.
